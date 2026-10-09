@@ -1,73 +1,127 @@
-# model-router: Agent SDK で Opus / Sonnet / Haiku 5.5 を使い分ける mod
+# model-router：Claude Agent SDK でターンごとに Opus / Sonnet / Haiku を切り替える
 
-Claude Code の mod（関数フック）で、**ターンごと・サブエージェントごと**に使うモデルを選びます。
-Claude Agent SDK からは `plugins` オプションで読み込めます。UI は使わないので、ヘッドレスでも動く部分だけで作っています。
+Claude Code の mod（関数フック）で、AI エージェントがターンごと・サブエージェントごとに Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5 を使い分けるようにし、その効果を測りました。
 
-## 仕組み
+mod は、Claude Code の内部イベントに JavaScript / TypeScript の関数でフックするプラグインです。Agent SDK でもフックが動きます（画面への描画はしません）。詳しくは公式ドキュメントを参照してください。
 
-| フック | やること |
+- [Mods overview](https://code.claude.com/docs/en/plugins/mods/overview)
+- [React to events: Follow a turn](https://code.claude.com/docs/en/plugins/mods/events#follow-a-turn)（今回使った `turn.step` などのイベント）
+- [Mods reference](https://code.claude.com/docs/en/plugins/mods/reference)
+
+## やったこと
+
+### 1. ルーティングの実装
+
+[plugins/model-router/](plugins/model-router/) は、次のフックで動きます。
+
+| フック | 役割 |
 | --- | --- |
-| `turn.start` | ユーザー入力から難易度を判定（キーワード＋長さ。`hybrid` のときは判断に迷うものだけ Haiku に聞く） |
-| `turn.step` | メインループの各リクエストの `model` / `effort` を判定結果で書き換える |
-| `agent.spawn` | 呼び出し側がモデルを指定していない組み込みサブエージェントにモデルを割り当てる（Explore→Haiku、general-purpose→Sonnet（難しい依頼なら Opus）、Plan→Opus） |
-| `prompt.submit` | `[opus] …` / `[sonnet] …` / `[haiku] …` のタグでそのターンだけ強制指定（タグはモデルに渡さない） |
-| `turn.complete` | 判定とそのターンの推定コストを `ui_log` として出す |
-| `/router-stats` | セッションのモデル別トークン数、推定コスト、「同じトークンを全部 Opus で処理した場合」の比較 |
-
-### 品質を落とさずにコストを下げるための設計
-
-- **モデルの切り替えはターン単位にしていて、ステップ単位では切り替えない。** プロンプトキャッシュはモデルごとに別なので、切り替えるとプロンプト全体のキャッシュ書き込みがやり直しになります。1ターン内のツールループでモデルを行き来させると、毎回キャッシュが無効になります。
-- **sticky（下げ止め）**：会話が `stickyContextTokens`（既定 40K）を超えたら、下位モデルへの切り替えはしません。キャッシュを書き直す費用が、安いモデルにする節約分を上回りやすいためです。上位モデルへの切り替えは品質を優先して常に許可します。
-- **サブエージェントがいちばん効果が大きい。** サブエージェントは毎回まっさらなコンテキストから始まるので、キャッシュ面の損がありません。読むだけの探索（Explore）を Haiku に回すのが一番安全な節約です。
-- **SDK ホストが自分で定義したエージェント（`agents` オプション）や、`model` を明示した呼び出しには手を出しません。**
-- **effort**：Haiku は `low`、Sonnet は `medium`、Opus は `high`。ただし、セッション本来のモデルのときはセッションの effort 設定をそのまま使います。
-
-価格（1M トークンあたり、入力 / 出力）：Opus 5.5 $4 / $20、Sonnet 5.5 $2 / $10、Haiku 5.5 $0.10 / $0.50（プロンプトが 100K トークンを超えると $0.50 / $2.50）。
-
-## Agent SDK での使い方
+| `turn.start` | 依頼文から難易度を判定する |
+| `turn.step` | メインループの各リクエストの `model` と `effort` を、判定結果に差し替える |
+| `agent.spawn` | モデルを指定していない組み込みのサブエージェントに、モデルを割り当てる（Explore は Haiku、general-purpose は Sonnet、Plan は Opus） |
+| `prompt.submit` | 依頼文の先頭の `[opus]` / `[sonnet]` / `[haiku]` で、そのターンのモデルを指定できる |
 
 ```ts
-import { query } from '@anthropic-ai/claude-agent-sdk'
-import { withRouter, routerLine } from './src/router'
-
-const options = withRouter(
-  { model: 'claude-opus-5-5', allowedTools: ['Read', 'Glob', 'Grep', 'Agent'] },
-  { classifier: 'hybrid', stickyContextTokens: 40000 },
-)
-for await (const m of query({ prompt: '…', options })) {
-  const line = routerLine(m) // {"type":"system","subtype":"ui_log","text":"model-router: haiku (...) · turn $0.0046"}
-  if (m.type === 'result') console.log(m.modelUsage, m.total_cost_usd) // 実際の課金見込みはこちらを正とする
-}
+on('turn.step', async function* ($, e, next) {
+  const tier = await decisions.get(e.turnId) // turn.start で判定済み
+  return yield* next({ ...e, model: MODEL_ID[tier], effort: EFFORT[tier] })
+})
 ```
 
-`withRouter` がやっているのは、次の2点だけです。
+- **判定**: キーワードと文の長さで判定し、確信が持てないときだけ Haiku に判定させます（1回 $0.001 未満）。ルールは [hooks/policy.ts](plugins/model-router/hooks/policy.ts) にあります。
+- **キャッシュへの配慮**: プロンプトキャッシュはモデルごとに別なので、切り替えはターン単位にしています。また、会話が 40K トークンを超えたら下位モデルへは切り替えません。
+
+### 2. 振り分けの検証
+
+| 対象 | 方法 |
+| --- | --- |
+| フックの動作 | 単体テスト10件（`claude plugin test`、API 呼び出しなし） |
+| 実際に応答したモデル | Opus を指定したセッションで軽い依頼を出し、API の応答の `message.model` を確認 |
+| 評価の全実行 | ルーターの判定と、SDK が報告した課金モデル（`result.modelUsage`）を照合（[eval/check-routing.ts](eval/check-routing.ts)） |
+
+### 3. コスト・レイテンシ・品質の評価
+
+- **タスク**: 小さな JavaScript ライブラリに対する18タスクです。内訳は easy 4、medium 4、hard 4、expert 6 です。
+  - easy は回答文で採点します。
+  - それ以外は、エージェントの作業後に隠しテストを追加して採点します。
+  - expert は仕様書付きのタスクで、semver の範囲判定、数式の評価器、不具合調査、全角を考慮した折り返しと禁則処理、LRU と TTL を組み合わせたキャッシュ、トポロジカルソートです。
+- **比較した4通り**: Opus 単独、Opus ＋ model-router（routed）、effort を low にした Opus、Sonnet 単独。
+- **条件**:
+  - 実行ごとに新しい作業ディレクトリを使い、ユーザー設定は読み込ませていません（`settingSources: []`）。
+  - 4通りを交互に実行し、各タスク1回、計72回です。
+  - コストは SDK の `total_cost_usd`（定価換算）、レイテンシは `duration_ms` です。
+
+## わかったこと
+
+### 振り分けは判定どおりに動く
+
+- 単体テストはすべて合格しました。
+- Opus を指定したセッションで軽い依頼を出すと、実際の応答は `claude-haiku-5-5` が返しました。
+- 評価の72回で、判定と課金モデルの不一致は0件でした。
+  - Claude Code 本体が毎回行う補助的な Haiku 呼び出し（コストの 0.2% 未満）は、照合から除いています。
+
+### コストとレイテンシは下がる
+
+| 比較対象 | 合格 | 合計コスト | レイテンシ中央値 | 合計レイテンシ |
+| --- | --- | --- | --- | --- |
+| routed | 18/18 | **$1.237** | 22.6秒 | **387秒** |
+| Opus 単独 | 18/18 | $2.966 | 32.4秒 | 589秒 |
+| Opus（effort low） | 17/18 ※ | $2.432 | 20.1秒 | 427秒 |
+| Sonnet 単独 | 18/18 | $1.555 | **18.6秒** | 431秒 |
+
+※ 不合格の1件は、確認用のコマンドが権限設定で拒否されたことによるものです。
+
+| 難易度 | routed | Opus 単独 | Opus（effort low） | Sonnet 単独 | routed の振り分け先 |
+| --- | --- | --- | --- | --- | --- |
+| easy | **$0.010** | $0.290 | $0.296 | $0.242 | Haiku 4 |
+| medium | **$0.144** | $0.589 | $0.460 | $0.266 | Haiku 2、Sonnet 2 |
+| hard | $0.406 | $0.663 | $0.603 | **$0.320** | Sonnet 3、Opus 1 |
+| expert | **$0.678** | $1.424 | $1.072 | $0.727 | Sonnet 5、Opus 1 |
+
+- **Opus 単独と比べると**: 合計コストが 58%、合計レイテンシが 34% 減りました。
+- **効果の大部分は、軽い依頼を Haiku に回したことによります。** エージェントは毎回、システムプロンプトとツール定義を送ります。この固定費が大きく、その単価がモデルによって最大40倍違うためです。
+- **Opus の effort を下げても、コストはあまり下がりません**（Opus 単独の 82%）。上の固定費が減らないためです。
+- **Sonnet 単独と比べると**: 合計コストは 20% 低くなりました。ただし、レイテンシの中央値と hard のコストでは、Sonnet 単独のほうが上回りました。
+
+### 品質の維持は評価しきれていない
+
+- **4通りとも、ほぼ全問に合格しました。** 今回のタスクは Sonnet でも解ける難しさで、「難しい依頼を Opus に回すことで品質を保てるか」は確かめられていません。モデル間で差が出るタスク（大きなコードベースの読解、曖昧な要求、長い作業など）での評価が必要です。
+- **サブエージェントの振り分けと下げ止めは、単体テストでしか確かめていません。**
+- **各タスク1回の実行なので、ばらつきは評価していません。**
+
+## 使い方
+
+Agent SDK では、`plugins` オプションで読み込みます（[src/router.ts](src/router.ts) の `withRouter`）。
 
 ```ts
-plugins: [{ type: 'local', path: './plugins/model-router' }],
-settings: { pluginConfigs: { 'model-router': { options: { classifier: 'hybrid' } } } },
+query({
+  prompt,
+  options: {
+    model: 'claude-opus-5-5',
+    plugins: [{ type: 'local', path: './plugins/model-router' }],
+    settings: { pluginConfigs: { 'model-router': { options: { classifier: 'hybrid' } } } },
+  },
+})
 ```
 
 | オプション | 値 | 既定値 |
 | --- | --- | --- |
-| `mainRouting` | `route` / `fixed`（メインループはセッションのモデル固定、サブエージェントだけ振り分け） | `route` |
-| `classifier` | `heuristic`（追加の呼び出しなし） / `hybrid` / `haiku`（毎ターン Haiku で判定） | `hybrid` |
-| `stickyContextTokens` | 数値 | `40000` |
+| `mainRouting` | `route`、または `fixed`（サブエージェントだけ振り分ける） | `route` |
+| `classifier` | `heuristic` / `hybrid` / `haiku` | `hybrid` |
+| `stickyContextTokens` | 下位モデルへ切り替えない会話の大きさ（トークン） | `40000` |
 | `subagentRouting` | 真偽値 | `true` |
-| `report` | `turn` / `off` | `turn` |
+| `report` | `turn`（ターンごとの判定とコストを `ui_log` に出す） / `off` | `turn` |
 
-## コマンド
+Claude Code では `claude --plugin-dir plugins/model-router` で起動します。`/router-stats` で、モデル別のトークン数と推定コストが見られます。
+
+## 評価の再現
 
 ```sh
 npm install
-npm run agent -- "src のファイル一覧を表示して"   # 1回だけ実行
-npm run bench                                     # Opus 単独と routed の A/B（課金が発生します）
-claude plugin test plugins/model-router           # mod の単体テスト（API 呼び出しなし）
+npx tsx eval/run.ts                                 # 全タスク × 4通り（課金が発生します）
+npx tsx eval/report.ts eval/results/*.jsonl         # 集計
+npx tsx eval/check-routing.ts eval/results/*.jsonl  # 判定と課金モデルの照合
+claude plugin test plugins/model-router             # mod の単体テスト
 ```
 
-`bench` は同じタスクを2通り（Opus 単独 / ルーティングあり）で実行し、コスト（`total_cost_usd`）とレイテンシ（`duration_ms`）を表にします。回答は `bench-out/` に保存されるので、品質は目で見比べてください。
-
-## 注意
-
-- mod の API（関数フック）は early access で、Claude Code のリリースごとに変わる可能性があります（2.1.295 / Agent SDK 0.3.295 で確認）。
-- `/router-stats` と per-turn ログのコストは定価からの概算です（Haiku 5.5 のキャッシュ読み取り単価は入力単価の 0.1 倍と仮定）。実際の値は SDK の `result.modelUsage[*].costUSD` を見てください。
-- 判定のキーワードは日本語と英語の例です。自分のアプリへの依頼文に合わせて `hooks/policy.ts` の `HARD` / `EASY` を調整するのが一番効きます。
+動作は Claude Code 2.1.295 / Agent SDK 0.3.295 で確認しました。mod の API は early access です。価格（1M トークンあたり、入力 / 出力）は、Opus 5.5 が $4 / $20、Sonnet 5.5 が $2 / $10、Haiku 5.5 が $0.10 / $0.50 です。
