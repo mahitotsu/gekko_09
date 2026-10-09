@@ -1,0 +1,40 @@
+{
+  "name": "model-router",
+  "version": "0.1.0",
+  "description": "Routes each turn and each subagent to Haiku 5.5, Sonnet 5.5 or Opus 5.5 by task difficulty, keeping prompt caches warm, and keeps a cost ledger.",
+  "userConfig": {
+    "mainRouting": {
+      "type": "string",
+      "title": "Main loop routing",
+      "description": "route: pick a model per turn; fixed: leave the main loop on the session's model.",
+      "options": ["route", "fixed"],
+      "default": "route"
+    },
+    "classifier": {
+      "type": "string",
+      "title": "Turn classifier",
+      "description": "heuristic: keywords and length only (no extra call); hybrid: ask Haiku only when the heuristic is unsure; haiku: always ask Haiku.",
+      "options": ["heuristic", "hybrid", "haiku"],
+      "default": "hybrid"
+    },
+    "stickyContextTokens": {
+      "type": "number",
+      "title": "Sticky context size",
+      "description": "Once the main conversation's prompt is this many tokens or more, the router never steps down a tier, since a switch rewrites the whole prompt cache on the new model.",
+      "default": 40000
+    },
+    "subagentRouting": {
+      "type": "boolean",
+      "title": "Route subagents",
+      "description": "Pick a model for subagents whose caller named none.",
+      "default": true
+    },
+    "report": {
+      "type": "string",
+      "title": "Per-turn report",
+      "description": "turn: log the tier, tokens and estimated cost after each main turn (an SDK host receives it as ui_log); off: only /router-stats.",
+      "options": ["turn", "off"],
+      "default": "turn"
+    }
+  }
+}
