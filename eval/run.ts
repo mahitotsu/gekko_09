@@ -9,9 +9,9 @@
 // recorded and stops the whole eval: it says nothing about the arm, so it
 // must not count as a fail. --resume continues from there.
 import { execFile } from 'node:child_process'
-import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, promisify } from 'node:util'
 
@@ -36,6 +36,8 @@ import {
   runEnv,
   type InitRecord,
 } from './env'
+import { copyPath } from './scenarios'
+import { gradeScenario, runTests, snapshot } from './scenario-grade'
 import { TASKS, type Task } from './tasks'
 
 const exec = promisify(execFile)
@@ -52,6 +54,7 @@ const { values: args } = parseArgs({
     tasks: { type: 'string' },
     resume: { type: 'string' },
     'env-only': { type: 'boolean', default: false },
+    final: { type: 'boolean', default: false },
   },
 })
 
@@ -71,7 +74,9 @@ const base = (cwd: string, env: Record<string, string>): Options => ({
   cwd,
   env,
   settingSources: [], // no user/project settings, CLAUDE.md or memory
-  settings: { language: LANGUAGE },
+  // Reads outside the run's directory are refused: the image holds every
+  // scenario's reference solution and hidden tests.
+  settings: { language: LANGUAGE, permissions: { blockReadsOutsideWorkingDirectories: true } },
   permissionMode: 'acceptEdits',
   allowedTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Agent', ...ALLOWED_BASH],
   disallowedTools: ['WebSearch', 'WebFetch'],
@@ -153,17 +158,24 @@ const ARMS: Arm[] = [
 // Raised when a run says nothing about the arm; stops the eval.
 class Infra extends Error {}
 
-const grade = async (task: Task, cwd: string, reply: string) => {
+const grade = async (
+  task: Task,
+  cwd: string,
+  reply: string,
+  artifacts: string,
+  snapshotTurns: { turn: number; paths: readonly string[] }[],
+) => {
   if (task.grade.kind === 'answer') return { pass: task.grade.check(reply), detail: '' }
+  if (task.grade.kind === 'scenario') return gradeScenario(task.grade, cwd, artifacts, snapshotTurns)
+  if (task.grade.kind === 'rubric') {
+    await copyPath(cwd, join(artifacts, 'final'), task.grade.doc)
+    const ok = await stat(join(cwd, task.grade.doc)).then(() => true, () => false)
+    return { pass: ok, detail: ok ? '' : `missing: ${task.grade.doc}` }
+  }
   await mkdir(join(cwd, 'test-hidden'), { recursive: true })
   await cp(here(`./${task.grade.dir ?? 'hidden'}/${task.grade.file}`), join(cwd, 'test-hidden', task.grade.file))
-  try {
-    await exec('node', ['--test'], { cwd, timeout: 60_000 })
-    return { pass: true, detail: '' }
-  } catch (err) {
-    const out = String((err as { stdout?: string }).stdout ?? err)
-    return { pass: false, detail: out.split('\n').filter(l => /^not ok|✖/.test(l)).slice(0, 5).join('\n') }
-  }
+  const r = await runTests(cwd, 'node', ['--test'], 60_000)
+  return { pass: r.count.ok, detail: r.failed.split('\n').slice(0, 5).join('\n') }
 }
 
 // The prompts of a multi-turn task, each sent once the previous turn's
@@ -220,10 +232,15 @@ const INFRA_ERRORS = new Set([
 ])
 
 const runOne = async (task: Task, arm: Arm, rep: number) => {
-  const cwd = await mkdtemp(join(tmpdir(), `eval-${task.id}-${arm.name}-`))
+  const cwd = await mkdtemp(join(tmpdir(), `eval-${task.id.replace(/\//g, "_")}-${arm.name}-`))
   const home = await mkdtemp(join(tmpdir(), `eval-home-`))
-  await cp(here(`./${task.fixture ?? 'fixture'}`), cwd, { recursive: true })
+  if (task.prepare) await task.prepare(cwd)
+  else await cp(here(`./${task.fixture ?? 'fixture'}`), cwd, { recursive: true })
   const prompts = typeof task.prompt === 'string' ? [task.prompt] : task.prompt
+  // Kept documents and snapshots: <results>.artifacts/<task>/<arm>/<rep>/
+  const artifactsRel = join(`${basename(out, '.jsonl')}.artifacts`, task.id, arm.name, String(rep))
+  const artifacts = join(dirname(out), artifactsRel)
+  const snapshotTurns: { turn: number; paths: readonly string[] }[] = []
   const started = Date.now()
   let initId: string | undefined
   let rateLimit: SDKRateLimitInfo | undefined
@@ -234,7 +251,8 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
   const turns: Record<string, unknown>[] = []
   let last: SDKResultMessage | undefined
   try {
-    const options = arm.options(cwd, await runEnv(home))
+    const armOptions = arm.options(cwd, await runEnv(home))
+    const options = task.maxTurns ? { ...armOptions, maxTurns: task.maxTurns } : armOptions
     const convo = prompts.length > 1 ? conversation(prompts) : undefined
     for await (const m of query({ prompt: convo?.messages ?? prompts[0]!, options })) {
       initId ??= checkInit(m, arm)
@@ -265,6 +283,11 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
           stopReason: m.stop_reason,
           errors: m.subtype === 'success' ? [] : m.errors,
         })
+        const paths = task.snapshots?.[turns.length - 1]
+        if (paths) {
+          await snapshot(cwd, artifacts, turns.length, paths)
+          snapshotTurns.push({ turn: turns.length, paths })
+        }
         // After the last turn the input closes and the session ends by
         // itself; lines logged after the result (the router's) still arrive.
         convo?.turnEnded()
@@ -291,7 +314,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
     throw new Infra(`${task.id} ${arm.name}: no model response: ${last.subtype === 'success' ? last.result : last.errors.join('; ')}`)
   }
   const reply = last.subtype === 'success' ? last.result : ''
-  const graded = await grade(task, cwd, reply)
+  const graded = await grade(task, cwd, reply, artifacts, snapshotTurns)
   await rm(cwd, { recursive: true, force: true })
   const { requests, unmatched } = buildRequests(steps, [...splits.values()], last.modelUsage)
   const main = requests.filter(r => r.agent === null)
@@ -322,6 +345,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
       input: JSON.stringify(d.tool_input).slice(0, 300),
     })),
     rateLimit: rateLimit ?? null,
+    artifacts: task.grade.kind === 'scenario' || task.grade.kind === 'rubric' ? artifactsRel : null,
     routerLog,
     reply: reply.slice(0, 2000),
   }
@@ -355,7 +379,18 @@ const resumed = args.resume
 const armNames = args.arms?.split(',') ?? resumed?.arms
 const taskIds = args.tasks?.split(',') ?? resumed?.tasks
 const arms = armNames ? ARMS.filter(a => armNames.includes(a.name)) : ARMS.filter(a => !a.experiment)
-const tasks = taskIds ? TASKS.filter(t => taskIds.includes(t.id)) : TASKS.filter(t => !t.smoke)
+// --tasks takes ids, or a prefix ending in * (invoice/*). With no --tasks:
+// the small dev tasks (and the final ones too with --final). Naming a
+// final-split task needs --final.
+const named = (id: string) => taskIds!.some(t => (t.endsWith('*') ? id.startsWith(t.slice(0, -1)) : id === t))
+const tasks = taskIds
+  ? TASKS.filter(t => named(t.id))
+  : TASKS.filter(t => !t.smoke && t.level !== 'scenario' && (args.final || t.split !== 'final'))
+const finals = tasks.filter(t => t.split === 'final')
+if (finals.length && !args.final) {
+  console.error(`final-split tasks need --final (they stay untouched while the router is tuned): ${finals.map(t => t.id).join(', ')}`)
+  process.exit(1)
+}
 const reps = process.argv.includes('--reps') || !resumed ? Number(args.reps) : resumed.reps
 const concurrency = Number(args.concurrency)
 

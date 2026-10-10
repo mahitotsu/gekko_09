@@ -4,8 +4,15 @@
 // (the visible tests included, so a fix that breaks them fails).
 // A task with several prompts is one conversation: each prompt is sent in the
 // same session after the previous turn ends, and only the end state is graded.
+// `scenario` tasks come from eval/scenarios (see scenarios/index.ts).
+import { SCENARIOS, scenarioTasks } from './scenarios'
+import type { StageId } from './scenarios/types'
 
-export type Level = 'easy' | 'medium' | 'hard' | 'expert'
+export type Level = 'easy' | 'medium' | 'hard' | 'expert' | 'scenario'
+
+// The kind of work a small task is (P2): calibration finds the cheapest model
+// that does each kind reliably, and the router is judged against that.
+export type WorkKind = 'investigate' | 'small-change' | 'implement' | 'bugfix' | 'design'
 
 export type Task = {
   id: string
@@ -14,7 +21,21 @@ export type Task = {
   // Checks the eval itself (P0); run only when named with --tasks.
   smoke?: boolean
   fixture?: string // folder under eval/, default 'fixture'
-  grade: { kind: 'answer'; check: (reply: string) => boolean } | { kind: 'tests'; file: string; dir?: string }
+  // Builds the workspace instead of copying `fixture`.
+  prepare?: (cwd: string) => Promise<void>
+  maxTurns?: number
+  // Per prompt: workspace paths to keep once that turn ends (a trailing / is a directory).
+  snapshots?: readonly (readonly string[] | undefined)[]
+  // final: kept out of every run unless --final is given (untouched while the router is tuned).
+  split?: 'dev' | 'final'
+  kind?: WorkKind
+  grade:
+    | { kind: 'answer'; check: (reply: string) => boolean }
+    | { kind: 'tests'; file: string; dir?: string }
+    // stage absent: the whole scenario; otherwise one stage started from the model output.
+    | { kind: 'scenario'; scenario: string; stage?: StageId }
+    // A document graded later against eval/<rubric> (eval/grade-docs.ts); the run only checks it exists.
+    | { kind: 'rubric'; rubric: string; doc: string }
 }
 
 export const TASKS: Task[] = [
@@ -81,6 +102,15 @@ export const TASKS: Task[] = [
     grade: { kind: 'answer', check: () => true },
   },
   {
+    // Reads outside the run's directory must be refused (the image holds the
+    // scenarios' reference solutions): the run must record a denial.
+    id: 'p0-outside',
+    level: 'easy',
+    smoke: true,
+    prompt: 'Bash で cat /etc/hostname を実行して、出力をそのまま見せて。ほかの方法は使わないで。',
+    grade: { kind: 'answer', check: () => true },
+  },
+  {
     // P1: a conversation whose history is long enough that a lost cache shows.
     // Turn 1 reads every source file; turns 2-4 answer from it in one request.
     id: 'p1-history',
@@ -104,6 +134,38 @@ export const TASKS: Task[] = [
       'ツールは使わずに答えて。1 から 2000 までの整数のうち、各桁の数字の和が 7 の倍数で、かつ 3 で割り切れないものはいくつある？最後に数だけを書いて。',
     ],
     grade: { kind: 'answer', check: r => /(^|\D)215(\D|$)/.test(r) },
+  },
+  {
+    id: 's1-max-cart',
+    level: 'easy',
+    prompt: 'カートに入れられる商品の上限を、50個から100個に変えて。テストが通る状態にしておいて。',
+    grade: { kind: 'tests', file: 's1-max-cart.test.js' },
+  },
+  {
+    id: 's2-report-header',
+    level: 'easy',
+    prompt: 'salesReport の出力の先頭に「売上レポート」という見出しの行を付けて。テストが通る状態にしておいて。',
+    grade: { kind: 'tests', file: 's2-report-header.test.js' },
+  },
+  {
+    id: 's3-timeout-env',
+    level: 'easy',
+    prompt:
+      'DEFAULT_TIMEOUT_MS を、環境変数 SHOP_TIMEOUT_MS で上書きできるようにして。未設定のときや数値でないときは、今の値のままにして。テストが通る状態にしておいて。',
+    grade: { kind: 'tests', file: 's3-timeout-env.test.js' },
+  },
+  {
+    id: 'd1-inventory-design',
+    level: 'medium',
+    prompt:
+      '在庫の予約で、同じ商品に同時に注文が入ると在庫以上に予約が通ってしまう問題がある。store のインターフェース（get/set）は変えられない前提で、対策の設計を docs/inventory-design.md に書いて。実装はしないで。',
+    grade: { kind: 'rubric', rubric: 'rubric/d1-inventory-design.md', doc: 'docs/inventory-design.md' },
+  },
+  {
+    id: 'd2-csv-design',
+    level: 'medium',
+    prompt: 'parseCsv を RFC 4180 に対応させたい。設計を docs/csv-design.md に書いて。実装はしないで。',
+    grade: { kind: 'rubric', rubric: 'rubric/d2-csv-design.md', doc: 'docs/csv-design.md' },
   },
   {
     id: 'm4-tax-rounding',
@@ -161,4 +223,37 @@ export const TASKS: Task[] = [
     fixture: 'fixture-hard',
     grade: { kind: 'tests', file: `${id}.test.js`, dir: 'hidden-hard' },
   })),
+  ...SCENARIOS.flatMap(scenarioTasks),
 ]
+
+// Kind and split of the small tasks. About a third of each kind is final, so
+// the router's judgment can be checked on tasks it was not tuned on (P5).
+const SMALL: Record<string, [WorkKind, 'dev' | 'final']> = {
+  'e1-timeout': ['investigate', 'dev'],
+  'e2-addtax-file': ['investigate', 'dev'],
+  'e3-todos': ['investigate', 'final'],
+  'e4-formatyen-calls': ['investigate', 'dev'],
+  'm1-negative-yen': ['small-change', 'dev'],
+  'm2-cart-clear': ['small-change', 'final'],
+  's1-max-cart': ['small-change', 'dev'],
+  's2-report-header': ['small-change', 'dev'],
+  's3-timeout-env': ['small-change', 'final'],
+  'd1-inventory-design': ['design', 'dev'],
+  'd2-csv-design': ['design', 'final'],
+  'm3-csv-quotes': ['implement', 'dev'],
+  'h3-coupons': ['implement', 'dev'],
+  'h4-holidays': ['implement', 'final'],
+  'x1-semver': ['implement', 'dev'],
+  'x2-expr': ['implement', 'final'],
+  'x4-wrap': ['implement', 'dev'],
+  'x5-cache': ['implement', 'dev'],
+  'm4-tax-rounding': ['bugfix', 'dev'],
+  'h1-inventory-race': ['bugfix', 'dev'],
+  'h2-cart-capacity': ['bugfix', 'final'],
+  'x3-autosave': ['bugfix', 'dev'],
+  'x6-toposort': ['bugfix', 'final'],
+}
+for (const t of TASKS) {
+  const k = SMALL[t.id]
+  if (k) [t.kind, t.split] = k
+}
