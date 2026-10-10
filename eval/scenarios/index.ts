@@ -7,11 +7,12 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Task } from '../tasks'
+import { attendance } from './attendance/scenario'
 import { expense } from './expense/scenario'
 import { invoice } from './invoice/scenario'
 import type { Scenario, Stage } from './types'
 
-export const SCENARIOS: readonly Scenario[] = [invoice, expense]
+export const SCENARIOS: readonly Scenario[] = [invoice, expense, attendance]
 
 export const scenarioDir = (id: string) => fileURLToPath(new URL(`./${id}/`, import.meta.url))
 
