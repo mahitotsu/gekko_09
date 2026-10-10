@@ -24,6 +24,8 @@ test('list prices and cache multipliers', () => {
   close(requestUsd(req({ cacheWrite5m: 1e6 })), 5)
   close(requestUsd(req({ cacheWrite1h: 1e6 })), 8)
   close(requestUsd(req({ model: 'claude-sonnet-5-5', in: 1e6, out: 1e6 })), 12)
+  close(requestUsd(req({ model: 'claude-sonnet-5-5', cacheRead: 1e6 })), 0.1)
+  close(requestUsd(req({ model: 'claude-haiku-5-5', cacheRead: 100_000 })), 0.001)
 })
 
 test('Haiku over 100K prompt tokens bills at the long-prompt rate', () => {
@@ -82,12 +84,9 @@ test('requests take tokens from the probe, the TTL split from the SDK, and the r
   ])
 })
 
-test('a write with no SDK split is counted at the 1-hour rate', () => {
-  const { requests, unmatched } = buildRequests(
-    [{ agent: null, model: 'claude-opus-5-5', answered: null, in: 1, cacheRead: 0, cacheWrite: 100, out: 1 }],
-    [],
-    {},
-  )
-  assert.equal(unmatched, 1)
-  assert.equal(requests[0]!.cacheWrite1h, 100)
+test('a write with no SDK split takes the TTL of its kind of request: 1 hour on main, 5 minutes in a subagent', () => {
+  const step = (agent: string | null) => ({ agent, model: 'claude-opus-5-5', answered: null, in: 1, cacheRead: 0, cacheWrite: 100, out: 1 })
+  const { requests, unmatched } = buildRequests([step(null), step('a1')], [], {})
+  assert.equal(unmatched, 2)
+  assert.deepEqual(requests.map(r => [r.cacheWrite5m, r.cacheWrite1h]), [[0, 100], [100, 0]])
 })

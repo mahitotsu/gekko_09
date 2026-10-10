@@ -6,6 +6,9 @@
 // reaches it. Auth is CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`),
 // passed through by name; this code never prints or stores its value.
 // The eval measures Japanese use: the time zone is Japan's, whatever the host's.
+// Cache TTLs are pinned to a subscription's defaults (1 hour on the main
+// conversation, 5 minutes for subagents and other requests), which Claude
+// Code would otherwise drop to 5 minutes once usage credits are drawn.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -16,7 +19,12 @@ import { fileURLToPath } from 'node:url'
 import type { SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
 
 const PASS_THROUGH = ['PATH', 'CLAUDE_CODE_OAUTH_TOKEN']
-export const FIXED_ENV = { TZ: 'Asia/Tokyo', LANG: 'C.UTF-8' }
+export const FIXED_ENV = {
+  TZ: 'Asia/Tokyo',
+  LANG: 'C.UTF-8',
+  CLAUDE_CODE_PROMPT_CACHE_TTL: '1h',
+  CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m',
+}
 
 // Credentials and providers the eval must not use: an API key or a cloud
 // provider would bill differently and change what the session loads.

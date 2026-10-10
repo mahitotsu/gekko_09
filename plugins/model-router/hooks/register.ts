@@ -9,9 +9,11 @@ import {
   MODEL_ID,
   parseOverride,
   promptTokens,
+  resolveTtls,
   tierForSubagent,
   tierOfModel,
   TIERS,
+  type CacheTtl,
   type Tier,
   type Usage,
   type Verdict,
@@ -54,6 +56,8 @@ let lastMainContext = 0
 const decisions = new Map<string, Promise<Decision>>()
 const turnUsd = new Map<string, number>()
 let ledger = newLedger()
+// Cache-write TTLs, read from the environment at session start.
+let ttl: { main: CacheTtl; other: CacheTtl } = { main: '1h', other: '5m' }
 
 async function askHaiku($: EngineInterface, text: string): Promise<Tier | undefined> {
   const r = await $.model.complete({
@@ -65,7 +69,7 @@ async function askHaiku($: EngineInterface, text: string): Promise<Tier | undefi
     timeoutMs: 5000,
   })
   if (!r.isAnswered) return undefined
-  record(MODEL_ID.haiku, r.usage)
+  record(MODEL_ID.haiku, r.usage, ttl.other)
   return TIERS.find(t => r.text.toLowerCase().includes(t))
 }
 
@@ -89,15 +93,15 @@ async function decide($: EngineInterface, text: string): Promise<Decision> {
     : { tier: held.tier, why: verdict.why }
 }
 
-function record(model: string, u: Usage, turnId?: string) {
+function record(model: string, u: Usage, writeTtl: CacheTtl, turnId?: string) {
   const tier = tierOfModel(model)
   if (!tier) return
-  const cost = costUsd(tier, u)
+  const cost = costUsd(tier, u, writeTtl)
   const row = ledger[tier]
   row.steps += 1
   row.usd += cost
   for (const k of Object.keys(row.usage) as (keyof Usage)[]) row.usage[k] += u[k]
-  ledger.allOpusUsd += costUsd('opus', u)
+  ledger.allOpusUsd += costUsd('opus', u, writeTtl)
   if (turnId) turnUsd.set(turnId, (turnUsd.get(turnId) ?? 0) + cost)
 }
 
@@ -109,6 +113,13 @@ export const register: Register = (on, options) => {
   cfg.report = String(options.report ?? 'turn')
 
   on('session.start', async ($, e, next) => {
+    ttl = resolveTtls({
+      FORCE_PROMPT_CACHING_5M: await $.env.get('FORCE_PROMPT_CACHING_5M'),
+      CLAUDE_CODE_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+      CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL'),
+      ENABLE_PROMPT_CACHING_1H: await $.env.get('ENABLE_PROMPT_CACHING_1H'),
+      ANTHROPIC_API_KEY: await $.env.get('ANTHROPIC_API_KEY'),
+    })
     await $.command.register({
       name: 'router-stats',
       description: 'Show model-router tiers, tokens and estimated cost for this session',
@@ -125,7 +136,7 @@ export const register: Register = (on, options) => {
     lines.push(
       `total ${usd(total)} vs same tokens on Opus ${usd(ledger.allOpusUsd)} (estimate; list prices)`,
     )
-    lines.push(`config ${JSON.stringify(cfg)}`)
+    lines.push(`config ${JSON.stringify(cfg)} cacheTtl ${JSON.stringify(ttl)}`)
     return { text: lines.join('\n') }
   })
 
@@ -146,7 +157,7 @@ export const register: Register = (on, options) => {
     // Subagent steps: their model was settled at agent.spawn; just account.
     if (e.agentId || cfg.mainRouting !== 'route') {
       const r = yield* next(e)
-      if (r.usage) record(r.usage.model, r.usage, e.turnId)
+      if (r.usage) record(r.usage.model, r.usage, e.agentId ? ttl.other : ttl.main, e.turnId)
       return r
     }
 
@@ -163,7 +174,7 @@ export const register: Register = (on, options) => {
 
     const r = yield* next(step)
     if (r.usage) {
-      record(r.usage.model, r.usage, e.turnId)
+      record(r.usage.model, r.usage, ttl.main, e.turnId)
       lastMainContext = promptTokens(r.usage)
     }
     if (tier) lastMainTier = tier

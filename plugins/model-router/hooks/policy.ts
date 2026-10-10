@@ -133,7 +133,7 @@ type Price = { input: number; output: number; cacheRead: number }
 
 const PRICE: Record<Tier, Price> = {
   opus: { input: 4, output: 20, cacheRead: 0.2 },
-  sonnet: { input: 2, output: 10, cacheRead: 0.2 },
+  sonnet: { input: 2, output: 10, cacheRead: 0.1 },
   haiku: { input: 0.1, output: 0.5, cacheRead: 0.01 },
 }
 // Haiku 5.5 bills prompts over 100K tokens at $0.50 / $2.50.
@@ -149,13 +149,39 @@ export type Usage = {
 export const promptTokens = (u: Usage) =>
   u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
 
-export const costUsd = (tier: Tier, u: Usage): number => {
+// Cache writes cost 1.25x input on the 5-minute TTL and 2x on the 1-hour TTL.
+export type CacheTtl = '5m' | '1h'
+
+export const costUsd = (tier: Tier, u: Usage, ttl: CacheTtl = '5m'): number => {
   const p = tier === 'haiku' && promptTokens(u) > 100_000 ? HAIKU_LONG : PRICE[tier]
   return (
     (u.input_tokens * p.input +
-      u.cache_creation_input_tokens * p.input * 1.25 +
+      u.cache_creation_input_tokens * p.input * (ttl === '1h' ? 2 : 1.25) +
       u.cache_read_input_tokens * p.cacheRead +
       u.output_tokens * p.output) /
     1_000_000
   )
+}
+
+// The TTL Claude Code writes the cache with, for the main conversation and
+// for everything else (subagents, helper calls), in the order the docs give
+// (code.claude.com/docs/en/prompt-caching, "Choose the TTL yourself"). The
+// default assumes a subscription unless an API key is set; a subscription
+// that has gone over its plan's usage gets 5 minutes, which this cannot see.
+export type TtlEnv = {
+  FORCE_PROMPT_CACHING_5M?: string
+  CLAUDE_CODE_PROMPT_CACHE_TTL?: string
+  CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL?: string
+  ENABLE_PROMPT_CACHING_1H?: string
+  ANTHROPIC_API_KEY?: string
+}
+
+export const resolveTtls = (env: TtlEnv): { main: CacheTtl; other: CacheTtl } => {
+  const pick = (v: string | undefined): CacheTtl | undefined => (v === '5m' || v === '1h' ? v : undefined)
+  if (env.FORCE_PROMPT_CACHING_5M === '1') return { main: '5m', other: '5m' }
+  const all1h = env.ENABLE_PROMPT_CACHING_1H === '1' ? '1h' : undefined
+  return {
+    main: pick(env.CLAUDE_CODE_PROMPT_CACHE_TTL) ?? all1h ?? (env.ANTHROPIC_API_KEY ? '5m' : '1h'),
+    other: pick(env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL) ?? all1h ?? '5m',
+  }
 }

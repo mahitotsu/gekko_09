@@ -12,14 +12,17 @@
 // request in the same results showed, a lower bound on the prefix that
 // every run shares (system prompt and tool definitions).
 
-// USD per million tokens, first-party API, list prices as of 2026-10
-// (Claude API model table). Cache writes cost 1.25x input for the 5-minute
-// TTL and 2x for the 1-hour TTL.
+// USD per million tokens, first-party API, list prices from
+// platform.claude.com/docs/en/about-claude/pricing (checked 2026-10-10).
+// Cache writes cost 1.25x input for the 5-minute TTL and 2x for the 1-hour
+// TTL; cache reads are 0.05x input on Opus 5.5 and Sonnet 5.5, 0.1x on Haiku.
+// (The SDK's bundled table prices Sonnet 5.5 reads at $0.20, so its
+// total_cost_usd runs high on Sonnet.)
 type Price = { input: number; output: number; cacheRead: number }
 
 export const PRICES: Record<string, Price> = {
   'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2 },
-  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.2 },
+  'claude-sonnet-5-5': { input: 2, output: 10, cacheRead: 0.1 },
   'claude-haiku-5-5': { input: 0.1, output: 0.5, cacheRead: 0.01 },
 }
 // Haiku 5.5 bills a request whose prompt is over 100K tokens at 5x.
@@ -155,8 +158,9 @@ type ModelTotals = Record<string, { inputTokens: number; outputTokens: number; c
 
 // The run's requests: one per probe step, its cache write split by the SDK
 // message with the same input and cache counts. A write with no matching
-// message is counted at the 1-hour rate, the TTL Claude Code uses with a
-// subscription token. Then one `aux` request per model for what the SDK's
+// message is counted at the TTL Claude Code gives that kind of request
+// (docs: prompt-caching, "Which TTL each request gets"; pinned by
+// eval/env.ts): 1 hour on the main loop, 5 minutes in a subagent. Then one `aux` request per model for what the SDK's
 // per-model totals hold beyond the steps: Claude Code's own helper calls,
 // such as the session title, which no step covers.
 export const buildRequests = (steps: ProbeStep[], splits: WriteSplit[], totals: ModelTotals) => {
@@ -173,8 +177,8 @@ export const buildRequests = (steps: ProbeStep[], splits: WriteSplit[], totals: 
       agent: s.agent,
       in: s.in,
       cacheRead: s.cacheRead,
-      cacheWrite5m: w ? w.cacheWrite5m : 0,
-      cacheWrite1h: w ? w.cacheWrite1h : s.cacheWrite,
+      cacheWrite5m: w ? w.cacheWrite5m : s.agent === null ? 0 : s.cacheWrite,
+      cacheWrite1h: w ? w.cacheWrite1h : s.agent === null ? s.cacheWrite : 0,
       out: s.out,
     }
   })

@@ -1,0 +1,13 @@
+{
+  "name": "eval-schedule",
+  "version": "0.1.0",
+  "description": "Eval instrumentation for P1: sends the main loop's requests with the model and effort a fixed schedule names, by turn and step, to measure what a switch does to the prompt cache.",
+  "userConfig": {
+    "schedule": {
+      "type": "string",
+      "title": "Schedule",
+      "description": "JSON list of {turn, step?, model?, effort?}: from that main-loop turn (1-based) and step (0-based) on, requests go with that model and effort.",
+      "default": "[]"
+    }
+  }
+}

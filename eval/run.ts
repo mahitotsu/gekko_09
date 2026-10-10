@@ -79,10 +79,35 @@ const base = (cwd: string, env: Record<string, string>): Options => ({
   persistSession: false,
 })
 
+const withSchedule = (o: Options, schedule: readonly object[]): Options => {
+  const settings = typeof o.settings === 'object' ? o.settings : {}
+  return {
+    ...o,
+    plugins: [...(o.plugins ?? []), { type: 'local', path: here('./schedule') }],
+    settings: {
+      ...settings,
+      pluginConfigs: { ...settings.pluginConfigs, 'eval-schedule': { options: { schedule: JSON.stringify(schedule) } } },
+    },
+  }
+}
+
+const scheduled = (name: string, model: string, schedule: readonly object[]): Arm => ({
+  name,
+  plugins: ['eval-schedule', 'eval-probe'],
+  experiment: true,
+  options: (cwd, env) => withProbe(withSchedule({ ...base(cwd, env), model }, schedule)),
+})
+
 // Every arm loads the probe, last, so it sees each request as sent.
 const withProbe = (o: Options): Options => ({ ...o, plugins: [...(o.plugins ?? []), { type: 'local', path: PROBE_DIR }] })
 
-type Arm = { name: string; plugins: string[]; options: (cwd: string, env: Record<string, string>) => Options }
+// `experiment` arms measure one mechanism (P1) and run only when named with --arms.
+type Arm = {
+  name: string
+  plugins: string[]
+  experiment?: boolean
+  options: (cwd: string, env: Record<string, string>) => Options
+}
 
 const fixed = (name: string, model: string, extra: Partial<Options> = {}): Arm => ({
   name,
@@ -101,6 +126,28 @@ const ARMS: Arm[] = [
   fixed('opus-low', 'claude-opus-5-5', { effort: 'low' }),
   fixed('sonnet', 'claude-sonnet-5-5'),
   fixed('haiku', 'claude-haiku-5-5'),
+  // P1: what a model or effort switch does to the prompt cache. Haiku at its
+  // default effort (medium), switched by eval/schedule at a turn or a step.
+  ...(
+    [
+      ['p1-fixed', []],
+      ['p1-effort', [{ turn: 2, effort: 'low' }, { turn: 4, effort: 'medium' }]],
+      ['p1-midturn', [{ turn: 1, step: 1, effort: 'low' }]],
+      ['p1-model', [{ turn: 2, model: 'claude-sonnet-5-5' }, { turn: 3, model: 'claude-haiku-5-5' }]],
+    ] as const
+  ).map(([name, schedule]) => scheduled(name, 'claude-haiku-5-5', schedule)),
+  // Whether an effort the mod sets mid-conversation reaches the API: turn 2
+  // needs thought, so low and max should differ widely in tokens.
+  scheduled('p1-think-low', 'claude-haiku-5-5', [{ turn: 1, effort: 'medium' }, { turn: 2, effort: 'low' }]),
+  scheduled('p1-think-max', 'claude-haiku-5-5', [{ turn: 1, effort: 'medium' }, { turn: 2, effort: 'max' }]),
+  // The same effort switch on the models the router changes effort on most.
+  ...(['sonnet', 'opus'] as const).map(m =>
+    scheduled(`p1-effort-${m}`, `claude-${m}-5-5`, [
+      { turn: 1, effort: 'medium' },
+      { turn: 2, effort: 'low' },
+      { turn: 4, effort: 'medium' },
+    ]),
+  ),
 ]
 
 // Raised when a run says nothing about the arm; stops the eval.
@@ -307,7 +354,7 @@ const resumed = args.resume
   : undefined
 const armNames = args.arms?.split(',') ?? resumed?.arms
 const taskIds = args.tasks?.split(',') ?? resumed?.tasks
-const arms = armNames ? ARMS.filter(a => armNames.includes(a.name)) : ARMS
+const arms = armNames ? ARMS.filter(a => armNames.includes(a.name)) : ARMS.filter(a => !a.experiment)
 const tasks = taskIds ? TASKS.filter(t => taskIds.includes(t.id)) : TASKS.filter(t => !t.smoke)
 const reps = process.argv.includes('--reps') || !resumed ? Number(args.reps) : resumed.reps
 const concurrency = Number(args.concurrency)

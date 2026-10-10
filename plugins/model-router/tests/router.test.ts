@@ -1,7 +1,7 @@
 import type { EngineInterface, On, TurnStepInput } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applySticky, classifyHeuristic, costUsd, parseOverride } from '../hooks/policy'
+import { applySticky, classifyHeuristic, costUsd, parseOverride, resolveTtls } from '../hooks/policy'
 
 // The engine's bottom for the events the router touches: every request
 // "answers" with fixed usage, and records which model and effort it was sent with.
@@ -60,6 +60,20 @@ describe('policy', () => {
     const u = { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     expect(costUsd('opus', u)).toBe(4)
     expect(costUsd('haiku', u)).toBe(0.5) // > 100K prompt: long-context rate
+    const w = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 }
+    const round = (n: number) => Math.round(n * 1e6) / 1e6
+    expect(round(costUsd('sonnet', w, '5m'))).toBe(2.6) // reads 0.05x ($0.10), 5-minute writes 1.25x ($2.50)
+    expect(round(costUsd('sonnet', w, '1h'))).toBe(4.1) // 1-hour writes 2x ($4)
+  })
+
+  test('cache TTLs follow the documented precedence', () => {
+    expect(resolveTtls({})).toEqual({ main: '1h', other: '5m' }) // subscription default
+    expect(resolveTtls({ ANTHROPIC_API_KEY: 'x' })).toEqual({ main: '5m', other: '5m' })
+    expect(resolveTtls({ ENABLE_PROMPT_CACHING_1H: '1', ANTHROPIC_API_KEY: 'x' })).toEqual({ main: '1h', other: '1h' })
+    expect(resolveTtls({ ENABLE_PROMPT_CACHING_1H: '1', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m' })).toEqual({ main: '1h', other: '5m' })
+    expect(resolveTtls({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })).toEqual({ main: '5m', other: '5m' })
+    expect(resolveTtls({ CLAUDE_CODE_PROMPT_CACHE_TTL: 'bogus' })).toEqual({ main: '1h', other: '5m' })
+    expect(resolveTtls({ FORCE_PROMPT_CACHING_5M: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })).toEqual({ main: '5m', other: '5m' })
   })
 })
 

@@ -81,6 +81,31 @@ export const TASKS: Task[] = [
     grade: { kind: 'answer', check: () => true },
   },
   {
+    // P1: a conversation whose history is long enough that a lost cache shows.
+    // Turn 1 reads every source file; turns 2-4 answer from it in one request.
+    id: 'p1-history',
+    level: 'easy',
+    smoke: true,
+    prompt: [
+      'src 配下のファイルをすべて Read で読んで、それぞれの役割を1行ずつ説明して。',
+      'addTax が定義されているファイルのパスだけ答えて。ツールは使わないで。',
+      'formatYen が定義されているファイルのパスだけ答えて。ツールは使わないで。',
+      'Cart クラスが定義されているファイルのパスだけ答えて。ツールは使わないで。',
+    ],
+    grade: { kind: 'answer', check: r => /cart\.js/.test(r) },
+  },
+  {
+    // P1: turn 2 needs thought and no tools, so its tokens show the effort it ran at.
+    id: 'p1-think',
+    level: 'easy',
+    smoke: true,
+    prompt: [
+      'DEFAULT_TIMEOUT_MS の値はいくつ？数値だけ答えて。',
+      'ツールは使わずに答えて。1 から 2000 までの整数のうち、各桁の数字の和が 7 の倍数で、かつ 3 で割り切れないものはいくつある？最後に数だけを書いて。',
+    ],
+    grade: { kind: 'answer', check: r => /(^|\D)215(\D|$)/.test(r) },
+  },
+  {
     id: 'm4-tax-rounding',
     level: 'medium',
     prompt: 'addTax の結果がコメントに書かれた仕様どおりになっていないらしい。確認して直して。',
