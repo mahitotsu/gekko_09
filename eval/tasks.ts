@@ -2,13 +2,17 @@
 // and how it is graded. `answer` tasks grade the final reply; `tests` tasks
 // copy eval/hidden/<file> in after the run and require `node --test` to pass
 // (the visible tests included, so a fix that breaks them fails).
+// A task with several prompts is one conversation: each prompt is sent in the
+// same session after the previous turn ends, and only the end state is graded.
 
 export type Level = 'easy' | 'medium' | 'hard' | 'expert'
 
 export type Task = {
   id: string
   level: Level
-  prompt: string
+  prompt: string | readonly string[]
+  // Checks the eval itself (P0); run only when named with --tasks.
+  smoke?: boolean
   fixture?: string // folder under eval/, default 'fixture'
   grade: { kind: 'answer'; check: (reply: string) => boolean } | { kind: 'tests'; file: string; dir?: string }
 }
@@ -56,6 +60,25 @@ export const TASKS: Task[] = [
     prompt:
       'parseCsv が "a,\\"b,c\\",d" のようなダブルクォートで囲まれたカンマ入りのフィールドを正しく扱えない。RFC 4180 に沿ってクォート（"" によるエスケープも）に対応させて。',
     grade: { kind: 'tests', file: 'm3-csv-quotes.test.js' },
+  },
+  {
+    id: 'mt1-negative-yen',
+    level: 'medium',
+    smoke: true,
+    prompt: [
+      'formatYen はマイナスの金額をどう表示する？コードを読んで、例を1つ挙げて説明して。まだ変更はしないで。',
+      'それを "-¥1,200" の形式に直して。',
+    ],
+    grade: { kind: 'tests', file: 'm1-negative-yen.test.js' },
+  },
+  {
+    // python3 is not an allowed command (and, unlike `git status`, not one
+    // Claude Code allows on its own as read-only), so the run must record a denial.
+    id: 'p0-denied',
+    level: 'easy',
+    smoke: true,
+    prompt: 'Bash で python3 -c "print(6*7)" を実行して、出力をそのまま見せて。ほかの方法は使わないで。',
+    grade: { kind: 'answer', check: () => true },
   },
   {
     id: 'm4-tax-rounding',

@@ -19,6 +19,7 @@ export const withRouter = (base: Options, router: RouterOptions = {}): Options =
   ...base,
   plugins: [...(base.plugins ?? []), { type: 'local', path: ROUTER_DIR }],
   settings: {
+    ...(typeof base.settings === 'object' ? base.settings : {}),
     pluginConfigs: { 'model-router': { options: { ...router } } },
   },
 })

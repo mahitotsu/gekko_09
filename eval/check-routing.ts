@@ -13,6 +13,7 @@ const BASELINE: Record<string, string> = {
   opus: ID.opus!,
   'opus-low': ID.opus!,
   sonnet: ID.sonnet!,
+  haiku: ID.haiku!,
 }
 
 type Row = { task: string; arm: string; routerLog: string[]; modelUsage?: Record<string, { costUSD: number }> }
@@ -27,23 +28,26 @@ for (const r of rows) {
   const used = new Set(Object.keys(r.modelUsage ?? {}))
   // Claude Code itself makes small Haiku calls in every session, routed or not.
   used.delete(ID.haiku!)
-  let want: string
+  // The models this run should have billed besides Haiku: the router's tier
+  // for each turn, or the baseline arm's one model.
+  let want: Set<string>
   if (r.arm === 'routed') {
-    const tiers = r.routerLog.map(l => l.split(' ')[1]!)
-    if (tiers.length !== 1) {
-      console.log(`✖ ${r.task} routed: ${tiers.length} router decisions`)
+    const tiers = r.routerLog.filter(l => l.startsWith('model-router: ')).map(l => l.split(' ')[1]!)
+    if (tiers.length === 0) {
+      console.log(`✖ ${r.task} routed: no router decisions`)
       bad++
       continue
     }
-    want = ID[tiers[0]!]!
+    want = new Set(tiers.map(t => ID[t]!))
   } else {
-    want = BASELINE[r.arm]!
+    want = new Set([BASELINE[r.arm]!])
     auxUsd += r.modelUsage?.[ID.haiku!]?.costUSD ?? 0
   }
-  // A Haiku-routed run bills Haiku only; any other run bills exactly its model besides Haiku.
-  const ok = want === ID.haiku ? used.size === 0 : used.size === 1 && used.has(want)
+  want.delete(ID.haiku!)
+  // Exactly the expected models besides Haiku, which every session bills a little of.
+  const ok = used.size === want.size && [...want].every(m => used.has(m))
   if (!ok) {
-    console.log(`✖ ${r.task} ${r.arm}: expected ${want}, billed ${[...used].join(', ') || '(haiku only)'}`)
+    console.log(`✖ ${r.task} ${r.arm}: expected ${[...want].join(', ') || '(haiku only)'}, billed ${[...used].join(', ') || '(haiku only)'}`)
     bad++
   }
 }

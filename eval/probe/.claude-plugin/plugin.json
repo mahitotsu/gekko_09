@@ -1,0 +1,5 @@
+{
+  "name": "eval-probe",
+  "version": "0.1.0",
+  "description": "Eval instrumentation: logs each model request's model, effort, token usage and duration as one ui_log line. Loaded in every eval arm; changes nothing."
+}
