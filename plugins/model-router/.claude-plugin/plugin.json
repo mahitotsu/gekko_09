@@ -50,6 +50,16 @@
       "description": "Register the doc-writer and test-runner agents and ask the main loop to use them.",
       "default": true
     },
+    "escalation": {
+      "type": "string",
+      "title": "Escalation on failing tests",
+      "description": "log: note in the turn's log line when three failing test runs in a row would have stepped the turn up; on: step up.",
+      "options": [
+        "log",
+        "on"
+      ],
+      "default": "log"
+    },
     "subagentRouting": {
       "type": "boolean",
       "title": "Route subagents",

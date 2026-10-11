@@ -5,12 +5,14 @@ import {
   costUsd,
   delegationSection,
   escalate,
-  isFailure,
+  isDocPath,
+  keepCacheForLookup,
   parseKind,
   parseOverride,
   resolveTtls,
   routeFor,
   switchCostUsd,
+  testOutcome,
   tierForSubagent,
 } from '../hooks/policy'
 
@@ -81,13 +83,31 @@ describe('routes', () => {
 })
 
 describe('failures', () => {
-  test('error results and failing test output', () => {
-    expect(isFailure(true, '')).toBe(true)
-    expect(isFailure(false, 'ℹ tests 35\nℹ pass 34\nℹ fail 1')).toBe(true)
-    expect(isFailure(false, '✖ nonLeapMar: invoices.csv (39.9ms)')).toBe(true)
-    expect(isFailure(false, '3 failing')).toBe(true)
-    expect(isFailure(false, 'ℹ tests 35\nℹ pass 35\nℹ fail 0')).toBe(false)
-    expect(isFailure(undefined, undefined)).toBe(false)
+  test('test output, not exit codes', () => {
+    expect(testOutcome('ℹ tests 35\nℹ pass 34\nℹ fail 1')).toBe('fail')
+    expect(testOutcome('✖ nonLeapMar: invoices.csv (39.9ms)')).toBe('fail')
+    expect(testOutcome('3 failing')).toBe('fail')
+    expect(testOutcome('ℹ tests 35\nℹ pass 35\nℹ fail 0')).toBe('pass')
+    expect(testOutcome('exit=2\n入力データの不整合: O9 の商品コード')).toBeUndefined()
+    expect(testOutcome(undefined)).toBeUndefined()
+  })
+})
+
+describe('cache', () => {
+  test('a lookup goes to Haiku only while that is cheap', () => {
+    const haiku = { tier: 'haiku' as const, effort: 'low' as const }
+    expect(keepCacheForLookup(haiku, 'sonnet', 150_000)).toEqual({ tier: 'sonnet', effort: 'low' })
+    expect(keepCacheForLookup(haiku, 'sonnet', 10_000)).toEqual(haiku)
+    expect(keepCacheForLookup(haiku, 'haiku', 150_000)).toEqual(haiku)
+    expect(keepCacheForLookup(haiku, undefined, 0)).toEqual(haiku)
+  })
+
+  test('documents are Markdown files', () => {
+    expect(isDocPath('docs/report.md')).toBe(true)
+    expect(isDocPath('/tmp/x/README.MD')).toBe(true)
+    expect(isDocPath('src/cli.js')).toBe(false)
+    expect(isDocPath('node_modules/a/README.md')).toBe(false)
+    expect(isDocPath(undefined)).toBe(false)
   })
 })
 

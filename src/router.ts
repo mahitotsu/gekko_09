@@ -10,6 +10,7 @@ export type RouterOptions = {
   base?: 'sonnet' | 'haiku'
   docs?: 'delegate' | 'switch'
   delegate?: boolean
+  escalation?: 'log' | 'on'
   subagentRouting?: boolean
   report?: 'turn' | 'off'
 }

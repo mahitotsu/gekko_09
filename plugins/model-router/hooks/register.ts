@@ -5,11 +5,13 @@ import {
   classifyHeuristic,
   costUsd,
   delegationSection,
+  DOC_DENY,
   DOC_WRITER,
   DOC_WRITER_PROMPT,
   escalate,
   FAILURES_TO_ESCALATE,
-  isFailure,
+  isDocPath,
+  keepCacheForLookup,
   MODEL_ID,
   parseKind,
   parseOverride,
@@ -20,12 +22,14 @@ import {
   ROUTES,
   TEST_RUNNER,
   TEST_RUNNER_PROMPT,
+  testOutcome,
   tierForSubagent,
   tierOfModel,
   TIERS,
   type Base,
   type CacheTtl,
   type DocsMode,
+  type EscalationMode,
   type Kind,
   type Route,
   type Tier,
@@ -62,19 +66,24 @@ const cfg = {
   docs: 'delegate' as DocsMode,
   subagentRouting: true,
   delegate: true,
+  escalation: 'log' as EscalationMode,
   report: 'turn',
 }
 
 // Module state: starts over on a reload, which is fine for a ledger.
 let pendingOverride: Tier | undefined
 let lastMainRoute: Route | undefined
+// The main conversation's prompt size at its last request.
+let lastMainContext = 0
 let isPlanning = false
 // The main loop's turn in progress: tool calls carry no turn id, and main turns run one at a time.
 let mainTurn: string | undefined
 const decisions = new Map<string, Promise<Decision>>()
-// Failures seen in a turn's tool results, and the route the turn escalated to.
+// Failing test runs in a row in a turn, and the route the turn escalated to
+// (or, with escalation: log, would have).
 const failures = new Map<string, number>()
 const escalated = new Map<string, Route>()
+const wouldEscalate = new Map<string, Route>()
 const turnUsd = new Map<string, number>()
 let ledger = newLedger()
 // Cache-write TTLs, read from the environment at session start.
@@ -108,7 +117,10 @@ async function decide($: EngineInterface, text: string): Promise<Decision> {
     const asked = await askHaiku($, text).catch(() => undefined)
     if (asked) verdict = { kind: asked, isSure: true, why: `haiku said ${asked}` }
   }
-  return { route: routeFor(verdict.kind, cfg.base, cfg.docs), kind: verdict.kind, why: verdict.why }
+  const wanted = routeFor(verdict.kind, cfg.base, cfg.docs)
+  const route = keepCacheForLookup(wanted, lastMainRoute?.tier, lastMainContext)
+  const why = route === wanted ? verdict.why : `${verdict.why}; kept ${route.tier} (${lastMainContext} tok cached)`
+  return { route, kind: verdict.kind, why }
 }
 
 function record(model: string, u: Usage, writeTtl: CacheTtl, turnId?: string) {
@@ -130,6 +142,7 @@ export const register: Register = (on, options) => {
   cfg.docs = options.docs === 'switch' ? 'switch' : 'delegate'
   cfg.subagentRouting = options.subagentRouting !== false
   cfg.delegate = options.delegate !== false
+  cfg.escalation = options.escalation === 'on' ? 'on' : 'log'
   cfg.report = String(options.report ?? 'turn')
 
   on('session.start', async ($, e, next) => {
@@ -214,23 +227,33 @@ export const register: Register = (on, options) => {
     const step = route ? { ...e, model: MODEL_ID[route.tier], effort: route.effort } : e
 
     const r = yield* next(step)
-    if (r.usage) record(r.usage.model, r.usage, ttl.main, e.turnId)
+    if (r.usage) {
+      record(r.usage.model, r.usage, ttl.main, e.turnId)
+      lastMainContext = promptTokens(r.usage)
+    }
     if (route) lastMainRoute = route
     return r
   })
 
   on('tool.call', async ($, e, next) => {
+    const isMain = !e.agentId && cfg.mainRouting === 'route'
+    // Documents go to the doc-writer: the main loop's Markdown writes are refused.
+    if (isMain && cfg.delegate && cfg.docs === 'delegate' && (e.tool === 'Write' || e.tool === 'Edit'))
+      if (isDocPath((e as { file_path?: unknown }).file_path)) return { deny: DOC_DENY }
+
     const r = await next(e)
-    if (e.agentId || cfg.mainRouting !== 'route') return r
+    if (!isMain) return r
     if (e.tool === 'EnterPlanMode') isPlanning = true
     if (e.tool === 'ExitPlanMode' && !r.deny) isPlanning = false
     const turnId = mainTurn
-    if (turnId && !r.deny && isFailure(r.isError, r.text)) {
+    const outcome = e.tool === 'Bash' && !r.deny ? testOutcome(r.text) : undefined
+    if (turnId && outcome === 'pass') failures.delete(turnId)
+    if (turnId && outcome === 'fail') {
       const n = (failures.get(turnId) ?? 0) + 1
       failures.set(turnId, n)
-      if (n >= FAILURES_TO_ESCALATE && !escalated.has(turnId)) {
+      if (n >= FAILURES_TO_ESCALATE && !escalated.has(turnId) && !wouldEscalate.has(turnId)) {
         const base = (await decisions.get(turnId)?.catch(() => undefined))?.route ?? lastMainRoute ?? ROUTES[cfg.base].work
-        escalated.set(turnId, escalate(base))
+        ;(cfg.escalation === 'on' ? escalated : wouldEscalate).set(turnId, escalate(base))
       }
     }
     return r
@@ -240,21 +263,27 @@ export const register: Register = (on, options) => {
     if (!e.agentId && cfg.mainRouting === 'route') {
       const d = await decisions.get(e.turnId)?.catch(() => undefined)
       const up = escalated.get(e.turnId)
+      const would = wouldEscalate.get(e.turnId)
       if (cfg.report === 'turn' && d) {
         const spent = turnUsd.get(e.turnId) ?? 0
         const what = d.kind ? `${d.kind} → ${d.route.tier}/${d.route.effort}` : `${d.route.tier}/${d.route.effort}`
-        $.ui.log(`model-router: ${what} (${d.why})${up ? `; escalated to ${up.tier}/${up.effort}` : ''} · turn ${usd(spent)}`)
+        $.ui.log(`model-router: ${what} (${d.why})${up ? `; escalated to ${up.tier}/${up.effort}` : ''}${would ? `; would escalate to ${would.tier}/${would.effort}` : ''} · turn ${usd(spent)}`)
       }
       if (mainTurn === e.turnId) mainTurn = undefined
       decisions.delete(e.turnId)
       failures.delete(e.turnId)
       escalated.delete(e.turnId)
+      wouldEscalate.delete(e.turnId)
       turnUsd.delete(e.turnId)
     }
     return next(e)
   })
 
   on('agent.spawn', ($, e, next) => {
+    // The main loop waits for its documents: a doc-writer left in the
+    // background lets the turn end, and a scripted next prompt, start before
+    // the document exists (P4 check on d1).
+    if (e.subagentType === `${PLUGIN}:${DOC_WRITER}` && e.background) e = { ...e, background: false }
     // The caller (or the SDK host's agent definition) named a model: respect it.
     if (!cfg.subagentRouting || e.model || e.workflow) return next(e)
     const tier = tierForSubagent(e.subagentType, e.description, e.prompt)
@@ -265,6 +294,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear') {
       ledger = newLedger()
       lastMainRoute = undefined
+      lastMainContext = 0
       isPlanning = false
     }
     return next(e)

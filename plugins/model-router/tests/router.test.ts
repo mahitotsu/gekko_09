@@ -3,10 +3,13 @@ import { describe, expect, test } from 'claude-code/testing'
 
 // The engine's bottom for the events the router touches: every request
 // "answers" with fixed usage, and records which model and effort it was sent with.
-const bottom = (on: On, seen: TurnStepInput[], promptTokens = 1000) => {
+const bottom = (on: On, seen: TurnStepInput[], promptTokens = 1000, logs: string[] = []) => {
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_$, e) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
   on('turn.step', async function* (_$, e) {
     seen.push(e)
     return {
@@ -102,12 +105,15 @@ describe('main loop', () => {
     expect(seen[0]!.model).toBe('claude-sonnet-5-5')
   })
 
-  test('two failures escalate the rest of the turn', H, async ($, on) => {
+  const E = { options: { classifier: 'heuristic', escalation: 'on' } }
+
+  test('three failing test runs in a row escalate the rest of the turn', E, async ($, on) => {
     const seen: TurnStepInput[] = []
     bottom(on, seen)
     tools(on, { text: 'ℹ tests 10\nℹ pass 8\nℹ fail 2' })
-    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 4, () => bash($))
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 5, () => bash($))
     expect(seen.map(s => [s.model, s.effort])).toEqual([
+      ['claude-sonnet-5-5', 'medium'],
       ['claude-sonnet-5-5', 'medium'],
       ['claude-sonnet-5-5', 'medium'],
       ['claude-opus-5-5', 'high'],
@@ -115,15 +121,58 @@ describe('main loop', () => {
     ])
     // The next turn starts over from its own kind.
     await runTurn($, 't2', 'CSV の出力に合計の列を追加して')
-    expect(seen[4]!.model).toBe('claude-sonnet-5-5')
+    expect(seen[5]!.model).toBe('claude-sonnet-5-5')
   })
 
-  test('passing tests do not escalate', H, async ($, on) => {
+  test('errors that are not failing tests do not count', E, async ($, on) => {
     const seen: TurnStepInput[] = []
     bottom(on, seen)
-    tools(on, { text: 'ℹ tests 10\nℹ pass 10\nℹ fail 0' })
-    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 3, () => bash($))
+    tools(on, { text: 'exit=2\n入力データの不整合', isError: true })
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 5, () => bash($))
     expect(seen.every(s => s.model === 'claude-sonnet-5-5')).toBe(true)
+  })
+
+  test('a passing run resets the streak', E, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    const outputs = ['ℹ fail 1', 'ℹ fail 1', 'ℹ fail 0', 'ℹ fail 1', 'ℹ fail 1']
+    let i = 0
+    on('tool.call', () => ({ result: {}, text: outputs[i++] }) as any)
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 6, () => bash($))
+    expect(seen.every(s => s.model === 'claude-sonnet-5-5')).toBe(true)
+  })
+
+  test('by default escalation is only logged', H, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    const logs: string[] = []
+    bottom(on, seen, 1000, logs)
+    tools(on, { text: 'ℹ fail 2' })
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 5, () => bash($))
+    expect(seen.every(s => s.model === 'claude-sonnet-5-5')).toBe(true)
+    expect(logs.join('\n')).toContain('would escalate to opus/high')
+  })
+
+  test('the main loop may not write documents itself', H, async ($, on) => {
+    const written: string[] = []
+    on('tool.call', (_$, e: any) => {
+      written.push(e.file_path)
+      return { result: {} } as any
+    })
+    const r = await $.tool.call({ tool: 'Write', file_path: 'docs/report.md', content: 'x' } as any)
+    expect((r as any).deny).toContain('model-router:doc-writer')
+    await $.tool.call({ tool: 'Write', file_path: 'src/cli.js', content: 'x' } as any)
+    expect(written).toEqual(['src/cli.js'])
+  })
+
+  test('a lookup late in a long conversation stays on the cached tier', H, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen, 150_000)
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して')
+    await runTurn($, 't2', 'src のファイル一覧を表示して')
+    expect(seen.map(s => [s.model, s.effort])).toEqual([
+      ['claude-sonnet-5-5', 'medium'],
+      ['claude-sonnet-5-5', 'low'],
+    ])
   })
 
   test('planning mode is Opus until ExitPlanMode', H, async ($, on) => {
@@ -189,5 +238,16 @@ describe('subagents', () => {
     expect((await $.agent.spawn(spawn('model-router:doc-writer') as any)).model).toBe('claude-opus-5-5')
     expect((await $.agent.spawn(spawn('Explore', 'opus') as any)).model).toBe('opus')
     expect((await $.agent.spawn(spawn('my-sdk-agent') as any)).model).toBe('claude-opus-5-5')
+  })
+
+  test('the doc-writer runs in the foreground', async ($, on) => {
+    const seen: boolean[] = []
+    on('agent.spawn', (_$, e) => {
+      seen.push(e.background)
+      return { model: e.model ?? e.parentModel, agentId: 'a1' }
+    })
+    await $.agent.spawn({ ...spawn('model-router:doc-writer'), background: true } as any)
+    await $.agent.spawn({ ...spawn('Explore'), background: true } as any)
+    expect(seen).toEqual([false, true])
   })
 })

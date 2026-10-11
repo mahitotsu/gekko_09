@@ -66,6 +66,18 @@ export type DocsMode = 'switch' | 'delegate'
 export const routeFor = (kind: Kind, base: Base, docs: DocsMode): Route =>
   kind === 'docs' && docs === 'delegate' ? ROUTES[base].work : ROUTES[base][kind]
 
+// Stepping down to Haiku for one short turn costs more than staying: Haiku
+// writes the whole conversation (2x input on the 1-hour TTL, and 5x prices
+// past 100K) where the current tier reads it from cache at 0.05x. So a
+// lookup goes to Haiku only on a small conversation or when Haiku already
+// holds it; otherwise it stays on the current tier at low effort.
+export const HAIKU_SWITCH_MAX_TOKENS = 20_000
+
+export const keepCacheForLookup = (route: Route, previous: Tier | undefined, contextTokens: number): Route =>
+  route.tier === 'haiku' && previous && previous !== 'haiku' && contextTokens >= HAIKU_SWITCH_MAX_TOKENS
+    ? { tier: previous, effort: 'low' }
+    : route
+
 // --- Prompt override: "[opus] ...", "[sonnet] ...", "[haiku] ..." ----------
 
 const OVERRIDE = /^\s*\[(haiku|sonnet|opus)\]\s*/i
@@ -158,8 +170,9 @@ export const parseKind = (answer: string): Kind | undefined => {
 
 // --- Escalation on failure -------------------------------------------------
 
-// A tool result that says the work is going wrong: an error result, or test
-// output that reports failures even when the command itself exited 0.
+// What a test run's output says: failing tests, all passing, or neither (not
+// a test run). Exit codes are not read: a CLI that exits 2 on bad input is
+// doing its job, and a denied command never ran (P4 check, 2026-10-12).
 const FAILING_TESTS = [
   /^\s*[✖✗×]\s/m,
   /^# fail [1-9]/m,
@@ -168,12 +181,25 @@ const FAILING_TESTS = [
   /^FAIL\b/m,
   /Tests?:\s+[1-9]\d* failed/i,
 ]
+const PASSING_TESTS = [/^[ℹ#] fail 0\b/m, /\b\d+ passing\b/, /^PASS\b/m, /Tests?:\s+\d+ passed/i]
 
-export const isFailure = (isError: boolean | undefined, text: string | undefined): boolean =>
-  isError === true || (text !== undefined && FAILING_TESTS.some(r => r.test(text)))
+export type TestOutcome = 'fail' | 'pass' | undefined
 
-// After this many failures in one turn the rest of the turn steps up.
-export const FAILURES_TO_ESCALATE = 2
+export const testOutcome = (text: string | undefined): TestOutcome => {
+  if (text === undefined) return undefined
+  if (FAILING_TESTS.some(r => r.test(text))) return 'fail'
+  if (PASSING_TESTS.some(r => r.test(text))) return 'pass'
+  return undefined
+}
+
+// Test runs that fail this many times in a row, with no passing run between,
+// step the rest of the turn up. Failing tests are normal while code is being
+// written, so a short streak is not enough.
+export const FAILURES_TO_ESCALATE = 3
+
+// on: escalate; log: only note in the turn's log line that it would have, to
+// learn from runs whether escalating would help before it acts.
+export type EscalationMode = 'on' | 'log'
 
 // One tier up, effort high; Opus stays Opus.
 export const escalate = (r: Route): Route => ({
@@ -206,6 +232,17 @@ export const TEST_RUNNER_PROMPT = [
   'Reply with: the command, pass and fail counts, and for each failure the test name and the key lines of the message.',
   'Do not change any file.',
 ].join('\n')
+
+// With docs: delegate, the main loop's writes of Markdown files are refused
+// with this, so the document is written by the doc-writer: asking in the
+// system prompt alone was ignored (P4 check: no delegation in two runs).
+export const isDocPath = (path: unknown): boolean =>
+  typeof path === 'string' && /\.md$/i.test(path) && !/(^|\/)node_modules\//.test(path)
+
+export const DOC_DENY = [
+  `Documents for people are written by the \`${PLUGIN}:${DOC_WRITER}\` agent, not on the main loop.`,
+  'Delegate this file to it: give the path, the sources to read, the decisions made in this conversation that are not in a file, and what to check.',
+].join(' ')
 
 // The system prompt section that asks the main loop to delegate.
 export const delegationSection = (docs: DocsMode): string =>
