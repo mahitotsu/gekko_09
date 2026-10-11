@@ -1,25 +1,39 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 import {
-  applySticky,
   CLASSIFIER_PROMPT,
   classifyHeuristic,
   costUsd,
-  EFFORT,
+  delegationSection,
+  DOC_WRITER,
+  DOC_WRITER_PROMPT,
+  escalate,
+  FAILURES_TO_ESCALATE,
+  isFailure,
   MODEL_ID,
+  parseKind,
   parseOverride,
+  PLUGIN,
   promptTokens,
   resolveTtls,
+  routeFor,
+  ROUTES,
+  TEST_RUNNER,
+  TEST_RUNNER_PROMPT,
   tierForSubagent,
   tierOfModel,
   TIERS,
+  type Base,
   type CacheTtl,
+  type DocsMode,
+  type Kind,
+  type Route,
   type Tier,
   type Usage,
   type Verdict,
 } from './policy'
 
-type Decision = { tier: Tier; why: string }
+type Decision = { route: Route; kind?: Kind; why: string }
 
 type Ledger = Record<Tier, { steps: number; usage: Usage; usd: number }> & {
   allOpusUsd: number
@@ -44,53 +58,57 @@ const usd = (n: number) => `$${n.toFixed(4)}`
 const cfg = {
   mainRouting: 'route',
   classifier: 'hybrid',
-  stickyTokens: 40000,
+  base: 'sonnet' as Base,
+  docs: 'delegate' as DocsMode,
   subagentRouting: true,
+  delegate: true,
   report: 'turn',
 }
 
 // Module state: starts over on a reload, which is fine for a ledger.
 let pendingOverride: Tier | undefined
-let lastMainTier: Tier | undefined
-let lastMainContext = 0
+let lastMainRoute: Route | undefined
+let isPlanning = false
+// The main loop's turn in progress: tool calls carry no turn id, and main turns run one at a time.
+let mainTurn: string | undefined
 const decisions = new Map<string, Promise<Decision>>()
+// Failures seen in a turn's tool results, and the route the turn escalated to.
+const failures = new Map<string, number>()
+const escalated = new Map<string, Route>()
 const turnUsd = new Map<string, number>()
 let ledger = newLedger()
 // Cache-write TTLs, read from the environment at session start.
 let ttl: { main: CacheTtl; other: CacheTtl } = { main: '1h', other: '5m' }
 
-async function askHaiku($: EngineInterface, text: string): Promise<Tier | undefined> {
+async function askHaiku($: EngineInterface, text: string): Promise<Kind | undefined> {
   const r = await $.model.complete({
     model: MODEL_ID.haiku,
     system: CLASSIFIER_PROMPT,
-    prompt: `${text.slice(0, 4000)}\n\nAnswer with one word: haiku, sonnet or opus.`,
+    prompt: `${text.slice(0, 4000)}\n\nAnswer with one word: lookup, work, fix, plan, docs or hard.`,
     maxTokens: 200,
     effort: 'low',
     timeoutMs: 5000,
   })
   if (!r.isAnswered) return undefined
   record(MODEL_ID.haiku, r.usage, ttl.other)
-  return TIERS.find(t => r.text.toLowerCase().includes(t))
+  return parseKind(r.text)
 }
 
 async function decide($: EngineInterface, text: string): Promise<Decision> {
   if (pendingOverride) {
     const tier = pendingOverride
     pendingOverride = undefined
-    return { tier, why: 'override' }
+    return { route: { tier, effort: 'medium' }, why: 'override' }
   }
   // A continuation (no typed text) stays where the conversation is.
-  if (text.trim() === '' && lastMainTier) return { tier: lastMainTier, why: 'continuation' }
+  if (text.trim() === '' && lastMainRoute) return { route: lastMainRoute, why: 'continuation' }
 
   let verdict: Verdict = classifyHeuristic(text)
   if (cfg.classifier === 'haiku' || (cfg.classifier === 'hybrid' && !verdict.isSure)) {
     const asked = await askHaiku($, text).catch(() => undefined)
-    if (asked) verdict = { tier: asked, isSure: true, why: `haiku said ${asked}` }
+    if (asked) verdict = { kind: asked, isSure: true, why: `haiku said ${asked}` }
   }
-  const held = applySticky(verdict.tier, lastMainTier, lastMainContext, cfg.stickyTokens)
-  return held.isHeld
-    ? { tier: held.tier, why: `${verdict.why}; held at ${held.tier} (${lastMainContext} tok cached)` }
-    : { tier: held.tier, why: verdict.why }
+  return { route: routeFor(verdict.kind, cfg.base, cfg.docs), kind: verdict.kind, why: verdict.why }
 }
 
 function record(model: string, u: Usage, writeTtl: CacheTtl, turnId?: string) {
@@ -108,8 +126,10 @@ function record(model: string, u: Usage, writeTtl: CacheTtl, turnId?: string) {
 export const register: Register = (on, options) => {
   cfg.mainRouting = String(options.mainRouting ?? 'route')
   cfg.classifier = String(options.classifier ?? 'hybrid')
-  cfg.stickyTokens = Number(options.stickyContextTokens ?? 40000)
+  cfg.base = options.base === 'haiku' ? 'haiku' : 'sonnet'
+  cfg.docs = options.docs === 'switch' ? 'switch' : 'delegate'
   cfg.subagentRouting = options.subagentRouting !== false
+  cfg.delegate = options.delegate !== false
   cfg.report = String(options.report ?? 'turn')
 
   on('session.start', async ($, e, next) => {
@@ -124,7 +144,32 @@ export const register: Register = (on, options) => {
       name: 'router-stats',
       description: 'Show model-router tiers, tokens and estimated cost for this session',
     })
+    if (cfg.delegate) {
+      if (cfg.docs === 'delegate')
+        await $.agent.register({
+          name: DOC_WRITER,
+          description: 'Writes or updates one document for people (requirements, design, specification, report, README) from the sources it is given.',
+          prompt: DOC_WRITER_PROMPT,
+          tools: ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Bash'],
+          model: MODEL_ID.opus,
+          effort: 'medium',
+        })
+      await $.agent.register({
+        name: TEST_RUNNER,
+        description: 'Runs a test suite or command and reports pass and fail counts and the failing tests. Changes no file.',
+        prompt: TEST_RUNNER_PROMPT,
+        tools: ['Bash', 'Read', 'Glob', 'Grep'],
+        model: MODEL_ID.haiku,
+        effort: 'low',
+      })
+    }
     return next(e)
+  })
+
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    if (!cfg.delegate || cfg.mainRouting !== 'route') return r
+    return { sections: [...r.sections, { id: `${PLUGIN}:delegation`, text: delegationSection(cfg.docs), scope: 'session' as const }] }
   })
 
   on('command.run', { command: 'router-stats' }, async () => {
@@ -161,34 +206,49 @@ export const register: Register = (on, options) => {
       return r
     }
 
+    mainTurn = e.turnId
     const pending = decisions.get(e.turnId)
     const d = pending ? await pending.catch(() => undefined) : undefined
-    const tier = d?.tier ?? lastMainTier
-    let step = e
-    if (tier) {
-      const model = MODEL_ID[tier]
-      // Keep the session's effort on its own model; set ours on the others.
-      const effort = tierOfModel(e.model) === tier ? e.effort : EFFORT[tier]
-      step = { ...e, model, effort }
-    }
+    // Planning mode is Opus until ExitPlanMode; failures escalate the rest of the turn.
+    const route = escalated.get(e.turnId) ?? (isPlanning ? ROUTES[cfg.base].plan : undefined) ?? d?.route ?? lastMainRoute
+    const step = route ? { ...e, model: MODEL_ID[route.tier], effort: route.effort } : e
 
     const r = yield* next(step)
-    if (r.usage) {
-      record(r.usage.model, r.usage, ttl.main, e.turnId)
-      lastMainContext = promptTokens(r.usage)
+    if (r.usage) record(r.usage.model, r.usage, ttl.main, e.turnId)
+    if (route) lastMainRoute = route
+    return r
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agentId || cfg.mainRouting !== 'route') return r
+    if (e.tool === 'EnterPlanMode') isPlanning = true
+    if (e.tool === 'ExitPlanMode' && !r.deny) isPlanning = false
+    const turnId = mainTurn
+    if (turnId && !r.deny && isFailure(r.isError, r.text)) {
+      const n = (failures.get(turnId) ?? 0) + 1
+      failures.set(turnId, n)
+      if (n >= FAILURES_TO_ESCALATE && !escalated.has(turnId)) {
+        const base = (await decisions.get(turnId)?.catch(() => undefined))?.route ?? lastMainRoute ?? ROUTES[cfg.base].work
+        escalated.set(turnId, escalate(base))
+      }
     }
-    if (tier) lastMainTier = tier
     return r
   })
 
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId && cfg.mainRouting === 'route') {
       const d = await decisions.get(e.turnId)?.catch(() => undefined)
-      decisions.delete(e.turnId)
+      const up = escalated.get(e.turnId)
       if (cfg.report === 'turn' && d) {
         const spent = turnUsd.get(e.turnId) ?? 0
-        $.ui.log(`model-router: ${d.tier} (${d.why}) · turn ${usd(spent)}`)
+        const what = d.kind ? `${d.kind} → ${d.route.tier}/${d.route.effort}` : `${d.route.tier}/${d.route.effort}`
+        $.ui.log(`model-router: ${what} (${d.why})${up ? `; escalated to ${up.tier}/${up.effort}` : ''} · turn ${usd(spent)}`)
       }
+      if (mainTurn === e.turnId) mainTurn = undefined
+      decisions.delete(e.turnId)
+      failures.delete(e.turnId)
+      escalated.delete(e.turnId)
       turnUsd.delete(e.turnId)
     }
     return next(e)
@@ -204,8 +264,8 @@ export const register: Register = (on, options) => {
   on('session.end', ($, e, next) => {
     if (e.reason === 'clear') {
       ledger = newLedger()
-      lastMainTier = undefined
-      lastMainContext = 0
+      lastMainRoute = undefined
+      isPlanning = false
     }
     return next(e)
   })

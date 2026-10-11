@@ -1,8 +1,6 @@
 import type { EngineInterface, On, TurnStepInput } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { applySticky, classifyHeuristic, costUsd, parseOverride, resolveTtls } from '../hooks/policy'
-
 // The engine's bottom for the events the router touches: every request
 // "answers" with fixed usage, and records which model and effort it was sent with.
 const bottom = (on: On, seen: TurnStepInput[], promptTokens = 1000) => {
@@ -28,66 +26,73 @@ const bottom = (on: On, seen: TurnStepInput[], promptTokens = 1000) => {
   })
 }
 
-const runTurn = async ($: EngineInterface | any, turnId: string, text: string) => {
-  await $.turn.start({ text, turnId })
-  const s = $.turn.step({ turnId, index: 0, model: 'claude-opus-5-5', messageCount: 1 })
+const step = async ($: EngineInterface | any, turnId: string, index: number) => {
+  const s = $.turn.step({ turnId, index, model: 'claude-opus-5-5', messageCount: 1 })
   for await (const _ of s) void _
   await s.result
+}
+
+// One turn: the steps, with `between(i)` run after step i (tool calls).
+const runTurn = async (
+  $: EngineInterface | any,
+  turnId: string,
+  text: string,
+  steps = 1,
+  between?: (i: number) => Promise<unknown>,
+) => {
+  await $.turn.start({ text, turnId })
+  for (let i = 0; i < steps; i++) {
+    await step($, turnId, i)
+    if (between) await between(i)
+  }
   await $.turn.complete({ turnId, reason: 'answer', answer: 'ok' })
 }
 
-describe('policy', () => {
-  test('heuristic tiers', () => {
-    expect(classifyHeuristic('このディレクトリのファイル一覧を表示して').tier).toBe('haiku')
-    expect(classifyHeuristic('認証モジュールを設計し直してリファクタして').tier).toBe('opus')
-    expect(classifyHeuristic('ログイン画面にパスワード表示トグルを付けたい。既存のフォームに合わせて。').tier).toBe(
-      'sonnet',
-    )
-  })
+// The engine's bottom for tool calls: Bash answers with the given output.
+const tools = (on: On, out: { text: string; isError?: boolean }) =>
+  on('tool.call', () => ({ result: { stdout: out.text, stderr: '' }, text: out.text, isError: out.isError }) as any)
 
-  test('override tag is stripped', () => {
-    expect(parseOverride('[Opus] なおして')).toEqual({ tier: 'opus', text: 'なおして' })
-    expect(parseOverride('なおして')).toEqual({ text: 'なおして' })
-  })
+const bash = ($: EngineInterface | any) => $.tool.call({ tool: 'Bash', command: 'npm test' })
 
-  test('sticky holds a step down once the cache is large', () => {
-    expect(applySticky('haiku', 'opus', 50_000, 40_000)).toEqual({ tier: 'opus', isHeld: true })
-    expect(applySticky('haiku', 'opus', 5_000, 40_000)).toEqual({ tier: 'haiku', isHeld: false })
-    expect(applySticky('opus', 'haiku', 90_000, 40_000)).toEqual({ tier: 'opus', isHeld: false })
-  })
-
-  test('cost uses per-tier prices', () => {
-    const u = { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-    expect(costUsd('opus', u)).toBe(4)
-    expect(costUsd('haiku', u)).toBe(0.5) // > 100K prompt: long-context rate
-    const w = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 }
-    const round = (n: number) => Math.round(n * 1e6) / 1e6
-    expect(round(costUsd('sonnet', w, '5m'))).toBe(2.6) // reads 0.05x ($0.10), 5-minute writes 1.25x ($2.50)
-    expect(round(costUsd('sonnet', w, '1h'))).toBe(4.1) // 1-hour writes 2x ($4)
-  })
-
-  test('cache TTLs follow the documented precedence', () => {
-    expect(resolveTtls({})).toEqual({ main: '1h', other: '5m' }) // subscription default
-    expect(resolveTtls({ ANTHROPIC_API_KEY: 'x' })).toEqual({ main: '5m', other: '5m' })
-    expect(resolveTtls({ ENABLE_PROMPT_CACHING_1H: '1', ANTHROPIC_API_KEY: 'x' })).toEqual({ main: '1h', other: '1h' })
-    expect(resolveTtls({ ENABLE_PROMPT_CACHING_1H: '1', CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '5m' })).toEqual({ main: '1h', other: '5m' })
-    expect(resolveTtls({ CLAUDE_CODE_PROMPT_CACHE_TTL: '5m' })).toEqual({ main: '5m', other: '5m' })
-    expect(resolveTtls({ CLAUDE_CODE_PROMPT_CACHE_TTL: 'bogus' })).toEqual({ main: '1h', other: '5m' })
-    expect(resolveTtls({ FORCE_PROMPT_CACHING_5M: '1', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' })).toEqual({ main: '5m', other: '5m' })
-  })
-})
 
 describe('main loop', () => {
-  test('routes each turn by difficulty', { options: { classifier: 'heuristic' } }, async ($, on) => {
+  const H = { options: { classifier: 'heuristic' } }
+
+  test('routes each turn by its kind', H, async ($, on) => {
     const seen: TurnStepInput[] = []
     bottom(on, seen)
     await runTurn($, 't1', 'src のファイル一覧を表示して')
-    await runTurn($, 't2', '決済処理の競合バグの原因をデバッグして直して')
-    expect(seen.map(s => s.model)).toEqual(['claude-haiku-5-5', 'claude-opus-5-5'])
-    expect(seen[0]!.effort).toBe('low')
+    await runTurn($, 't2', '決済処理の競合の原因が分からないので調べて')
+    await runTurn($, 't3', 'CSV の出力に合計の列を追加して')
+    expect(seen.map(s => [s.model, s.effort])).toEqual([
+      ['claude-haiku-5-5', 'low'],
+      ['claude-opus-5-5', 'high'],
+      ['claude-sonnet-5-5', 'medium'],
+    ])
   })
 
-  test('[sonnet] forces a tier for one turn', { options: { classifier: 'heuristic' } }, async ($, on) => {
+  test('a document turn stays on Sonnet when delegating', H, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    await runTurn($, 't1', '報告書を docs/report.md にまとめてください。')
+    expect(seen[0]!.model).toBe('claude-sonnet-5-5')
+  })
+
+  test('a document turn moves to Opus with docs: switch', { options: { classifier: 'heuristic', docs: 'switch' } }, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    await runTurn($, 't1', '報告書を docs/report.md にまとめてください。')
+    expect([seen[0]!.model, seen[0]!.effort]).toEqual(['claude-opus-5-5', 'medium'])
+  })
+
+  test('haiku base does the work on Haiku', { options: { classifier: 'heuristic', base: 'haiku' } }, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して')
+    expect([seen[0]!.model, seen[0]!.effort]).toEqual(['claude-haiku-5-5', 'medium'])
+  })
+
+  test('[sonnet] forces a tier for one turn', H, async ($, on) => {
     const seen: TurnStepInput[] = []
     bottom(on, seen)
     on('prompt.submit', (_$, e) => ({ text: e.text }))
@@ -97,15 +102,40 @@ describe('main loop', () => {
     expect(seen[0]!.model).toBe('claude-sonnet-5-5')
   })
 
-  test('does not step down once the prompt cache is big', { options: { classifier: 'heuristic' } }, async ($, on) => {
+  test('two failures escalate the rest of the turn', H, async ($, on) => {
     const seen: TurnStepInput[] = []
-    bottom(on, seen, 60_000)
-    await runTurn($, 't1', '認証まわりを設計し直してリファクタして')
-    await runTurn($, 't2', '一覧を表示して')
-    expect(seen.map(s => s.model)).toEqual(['claude-opus-5-5', 'claude-opus-5-5'])
+    bottom(on, seen)
+    tools(on, { text: 'ℹ tests 10\nℹ pass 8\nℹ fail 2' })
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 4, () => bash($))
+    expect(seen.map(s => [s.model, s.effort])).toEqual([
+      ['claude-sonnet-5-5', 'medium'],
+      ['claude-sonnet-5-5', 'medium'],
+      ['claude-opus-5-5', 'high'],
+      ['claude-opus-5-5', 'high'],
+    ])
+    // The next turn starts over from its own kind.
+    await runTurn($, 't2', 'CSV の出力に合計の列を追加して')
+    expect(seen[4]!.model).toBe('claude-sonnet-5-5')
   })
 
-  test('hybrid asks Haiku when unsure', async ($, on) => {
+  test('passing tests do not escalate', H, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    tools(on, { text: 'ℹ tests 10\nℹ pass 10\nℹ fail 0' })
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 3, () => bash($))
+    expect(seen.every(s => s.model === 'claude-sonnet-5-5')).toBe(true)
+  })
+
+  test('planning mode is Opus until ExitPlanMode', H, async ($, on) => {
+    const seen: TurnStepInput[] = []
+    bottom(on, seen)
+    on('tool.call', () => ({ result: {} }) as any)
+    await runTurn($, 't1', 'CSV の出力に合計の列を追加して', 2, i => (i === 0 ? $.tool.call({ tool: 'EnterPlanMode' } as any) : Promise.resolve()))
+    await runTurn($, 't2', 'CSV の出力に合計の列を追加して', 2, i => (i === 0 ? $.tool.call({ tool: 'ExitPlanMode', plan: 'x' } as any) : Promise.resolve()))
+    expect(seen.map(s => s.model)).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-opus-5-5', 'claude-sonnet-5-5'])
+  })
+
+  test('hybrid asks Haiku when unsure', { options: { docs: 'switch' } }, async ($, on) => {
     const seen: TurnStepInput[] = []
     bottom(on, seen)
     const asked: string[] = []
@@ -114,14 +144,21 @@ describe('main loop', () => {
       return {
         value: {
           isAnswered: true as const,
-          text: 'opus',
+          text: 'docs',
           usage: { input_tokens: 50, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
         },
       }
     })
-    await runTurn($, 't1', 'ログイン画面にパスワード表示トグルを付けたい。既存のフォームに合わせて。')
+    await runTurn($, 't1', 'いい感じにしておいて')
     expect(asked).toEqual(['claude-haiku-5-5'])
     expect(seen[0]!.model).toBe('claude-opus-5-5')
+  })
+
+  test('the system prompt asks to delegate', async ($, on) => {
+    on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' as const }] }))
+    const r = await $.prompt.compose({ model: 'claude-sonnet-5-5', promptModel: 'claude-sonnet-5-5', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
+    expect(r.sections.map((s: any) => s.id)).toEqual(['intro', 'model-router:delegation'])
+    expect(r.sections[1]!.text).toContain('model-router:doc-writer')
   })
 
   test('fixed leaves the main loop alone', { options: { mainRouting: 'fixed' } }, async ($, on) => {
@@ -145,11 +182,11 @@ describe('subagents', () => {
     fork: false,
   })
 
-  test('maps built-in types and respects an explicit model', async ($, on) => {
+  test('maps types and respects an explicit model', async ($, on) => {
     on('agent.spawn', (_$, e) => ({ model: e.model ?? e.parentModel, agentId: 'a1' }))
     expect((await $.agent.spawn(spawn('Explore') as any)).model).toBe('claude-haiku-5-5')
     expect((await $.agent.spawn(spawn('general-purpose') as any)).model).toBe('claude-sonnet-5-5')
-    expect((await $.agent.spawn(spawn('Plan') as any)).model).toBe('claude-opus-5-5')
+    expect((await $.agent.spawn(spawn('model-router:doc-writer') as any)).model).toBe('claude-opus-5-5')
     expect((await $.agent.spawn(spawn('Explore', 'opus') as any)).model).toBe('opus')
     expect((await $.agent.spawn(spawn('my-sdk-agent') as any)).model).toBe('claude-opus-5-5')
   })

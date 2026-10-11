@@ -1,27 +1,54 @@
 {
   "name": "model-router",
-  "version": "0.1.0",
-  "description": "Routes each turn and each subagent to Haiku 5.5, Sonnet 5.5 or Opus 5.5 by task difficulty, keeping prompt caches warm, and keeps a cost ledger.",
+  "version": "0.2.0",
+  "description": "Routes each turn and each subagent to Haiku 5.5, Sonnet 5.5 or Opus 5.5 by the kind of work: Sonnet for long work, Haiku for short jobs, Opus for planning, documents and repeated failures. Keeps a cost ledger.",
   "userConfig": {
     "mainRouting": {
       "type": "string",
       "title": "Main loop routing",
       "description": "route: pick a model per turn; fixed: leave the main loop on the session's model.",
-      "options": ["route", "fixed"],
+      "options": [
+        "route",
+        "fixed"
+      ],
       "default": "route"
     },
     "classifier": {
       "type": "string",
       "title": "Turn classifier",
-      "description": "heuristic: keywords and length only (no extra call); hybrid: ask Haiku only when the heuristic is unsure; haiku: always ask Haiku.",
-      "options": ["heuristic", "hybrid", "haiku"],
+      "description": "heuristic: keywords only (no extra call); hybrid: ask Haiku only when the heuristic is unsure; haiku: always ask Haiku.",
+      "options": [
+        "heuristic",
+        "hybrid",
+        "haiku"
+      ],
       "default": "hybrid"
     },
-    "stickyContextTokens": {
-      "type": "number",
-      "title": "Sticky context size",
-      "description": "Once the main conversation's prompt is this many tokens or more, the router never steps down a tier, since a switch rewrites the whole prompt cache on the new model.",
-      "default": 40000
+    "base": {
+      "type": "string",
+      "title": "Base tier",
+      "description": "sonnet: long work runs on Sonnet (default); haiku: long work runs on Haiku and failures escalate.",
+      "options": [
+        "sonnet",
+        "haiku"
+      ],
+      "default": "sonnet"
+    },
+    "docs": {
+      "type": "string",
+      "title": "Documents",
+      "description": "delegate: the main loop hands documents for people to an Opus doc-writer subagent; switch: a document turn moves the main loop to Opus.",
+      "options": [
+        "delegate",
+        "switch"
+      ],
+      "default": "delegate"
+    },
+    "delegate": {
+      "type": "boolean",
+      "title": "Register subagents",
+      "description": "Register the doc-writer and test-runner agents and ask the main loop to use them.",
+      "default": true
     },
     "subagentRouting": {
       "type": "boolean",
@@ -33,7 +60,10 @@
       "type": "string",
       "title": "Per-turn report",
       "description": "turn: log the tier, tokens and estimated cost after each main turn (an SDK host receives it as ui_log); off: only /router-stats.",
-      "options": ["turn", "off"],
+      "options": [
+        "turn",
+        "off"
+      ],
       "default": "turn"
     }
   }

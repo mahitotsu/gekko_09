@@ -7,7 +7,9 @@ export const ROUTER_DIR = fileURLToPath(new URL('../plugins/model-router', impor
 export type RouterOptions = {
   mainRouting?: 'route' | 'fixed'
   classifier?: 'heuristic' | 'hybrid' | 'haiku'
-  stickyContextTokens?: number
+  base?: 'sonnet' | 'haiku'
+  docs?: 'delegate' | 'switch'
+  delegate?: boolean
   subagentRouting?: boolean
   report?: 'turn' | 'off'
 }

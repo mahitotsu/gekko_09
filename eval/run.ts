@@ -24,7 +24,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 
-import { routerLine, withRouter } from '../src/router'
+import { routerLine, withRouter, type RouterOptions } from '../src/router'
 import { buildRequests, type ProbeStep, type WriteSplit } from './cost'
 import {
   assertNoSecret,
@@ -120,14 +120,20 @@ const fixed = (name: string, model: string, extra: Partial<Options> = {}): Arm =
   options: (cwd, env) => withProbe({ ...base(cwd, env), model, ...extra }),
 })
 
+// The router on a session that starts on Opus (the setup it replaces); the
+// options differ from the hybrid, Sonnet-base, delegate-docs default.
+const routed = (name: string, router: RouterOptions): Arm => ({
+  name,
+  plugins: ['model-router', 'eval-probe'],
+  options: (cwd, env) =>
+    withProbe(withRouter({ ...base(cwd, env), model: 'claude-opus-5-5' }, { classifier: 'hybrid', ...router })),
+})
+
 const ARMS: Arm[] = [
   fixed('opus', 'claude-opus-5-5'),
-  {
-    name: 'routed',
-    plugins: ['model-router', 'eval-probe'],
-    options: (cwd, env) =>
-      withProbe(withRouter({ ...base(cwd, env), model: 'claude-opus-5-5' }, { classifier: 'hybrid' })),
-  },
+  routed('routed', {}),
+  routed('routed-switch', { docs: 'switch' }),
+  routed('routed-haiku', { base: 'haiku' }),
   fixed('opus-low', 'claude-opus-5-5', { effort: 'low' }),
   fixed('sonnet', 'claude-sonnet-5-5'),
   fixed('haiku', 'claude-haiku-5-5'),
