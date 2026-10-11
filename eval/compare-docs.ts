@@ -2,14 +2,16 @@
 //   npx tsx eval/compare-docs.ts eval/results/<stamp>.jsonl [...more] --pairs haiku:opus[,sonnet:opus]
 //     [--docs requirements.md,design.md,spec.md,report.md] [--dry-run] [--concurrency 2]
 // For each document type and each pair of arms, every document of one arm is
-// compared with every document of the other, twice with the order swapped.
+// compared with every document of the other from the same task (script with
+// script, auto with auto), twice with the order swapped.
 // The judge gets the scenario's materials (the source of truth), the two
 // documents as 文書1 and 文書2 (no arm, task or run names), and, for the
 // report, each run's actual `npm test` output. It lists each document's
 // statements that contradict the materials and the important omissions,
 // then picks the better one or a tie. A side wins only when both orders agree.
 // Spends subscription usage (Opus); --dry-run builds the prompts and counts them.
-// Results: <first file>.compare.jsonl, one line per comparison; a rerun skips what it has.
+// Results: <first file>.compare.jsonl (.compare.<model>.jsonl for a judge other than
+// the default), one line per comparison; a rerun skips what it has.
 import { appendFile, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -21,6 +23,7 @@ import { DOCS, readProduct } from './docs'
 import { assertNoSecret, checkHostEnv, runEnv } from './env'
 import { scenarioDir, SCENARIOS } from './scenarios'
 
+const DEFAULT_JUDGE = 'claude-opus-5-5'
 const { values: args, positionals } = parseArgs({
   allowPositionals: true,
   options: {
@@ -28,7 +31,7 @@ const { values: args, positionals } = parseArgs({
     docs: { type: 'string', default: 'requirements.md,design.md,spec.md,report.md' },
     'dry-run': { type: 'boolean', default: false },
     concurrency: { type: 'string', default: '2' },
-    model: { type: 'string', default: 'claude-opus-5-5' },
+    model: { type: 'string', default: DEFAULT_JUDGE },
   },
 })
 if (!positionals.length || !args.pairs) throw new Error('give results files and --pairs a:b[,c:d]')
@@ -38,7 +41,7 @@ const docTypes = args.docs.split(',')
 const MAX_DOC = 60_000 // characters of one document shown to the judge
 
 // One document a run produced.
-type Doc = { scenario: string; type: string; arm: string; file: string; rep: number; root: string; id: string }
+type Doc = { scenario: string; task: string; type: string; arm: string; file: string; rep: number; root: string; id: string }
 const docs: Doc[] = []
 for (const file of positionals) {
   const stamp = file.replace(/^.*\//, '').replace(/\.jsonl$/, '')
@@ -49,7 +52,7 @@ for (const file of positionals) {
     if (!s || !row.artifacts) continue
     const stage = part.startsWith('stage-') ? s.stages[Number(part.slice(6)) - 1]!.id : undefined
     for (const d of DOCS.filter(d => docTypes.includes(d.rubric) && (!stage || d.stage === stage)))
-      docs.push({ scenario, type: d.rubric, arm: row.arm, file: stamp, rep: row.rep, root: join(dirname(file), row.artifacts, 'final'),
+      docs.push({ scenario, task: row.task, type: d.rubric, arm: row.arm, file: stamp, rep: row.rep, root: join(dirname(file), row.artifacts, 'final'),
         id: `${row.task}/${row.arm}/${stamp}/${row.rep}` })
   }
 }
@@ -60,13 +63,13 @@ const jobs: Job[] = []
 for (const [a, b] of pairs)
   for (const type of docTypes)
     for (const x of docs.filter(d => d.type === type && d.arm === a))
-      for (const y of docs.filter(d => d.type === type && d.arm === b && d.scenario === x.scenario))
+      for (const y of docs.filter(d => d.type === type && d.arm === b && d.task === x.task))
         for (const order of ['ab', 'ba'] as const) {
           const [first, second] = order === 'ab' ? [x, y] : [y, x]
           jobs.push({ key: `${type}|${x.id}|${y.id}|${order}`, scenario: x.scenario, type, first, second, order })
         }
 
-const out = positionals[0]!.replace(/\.jsonl$/, '.compare.jsonl')
+const out = positionals[0]!.replace(/\.jsonl$/, args.model === DEFAULT_JUDGE ? '.compare.jsonl' : `.compare.${args.model}.jsonl`)
 const done = new Set(
   (await readFile(out, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l).key as string),
 )
@@ -156,7 +159,7 @@ const compareOne = async (job: Job) => {
         tools: [],
         settingSources: [],
         persistSession: false,
-        maxTurns: 3,
+        maxTurns: 6, // Sonnet sometimes needs several tries to match the schema
         cwd: home,
         // Each pair of documents is read once: a 5-minute cache write costs
         // 1.25x input instead of 2x, and the materials are reread well within it.
