@@ -23,7 +23,7 @@
 
 ## 3. 計算の手順（billing.js）
 
-- `billingPeriod(month, closingDay)`: 末日締めは対象月の1日〜末日（末日は `Date.UTC(y, m, 0)`）。日付締めは前月（1月なら前年12月）の締め日の翌日〜対象月の締め日。締め日が 28 以下なので、翌日は必ず同じ月に収まる。
+- `billingPeriod(month, closingDay)`: 末日締めは対象月の1日〜末日（末日は `Date.UTC(y, m, 0)`）。日付締めは前月（1月なら前年12月）の締め日の翌日〜対象月の締め日。翌日は暦の上で求める（前月が平年の2月で28日締めなら、翌日は3月1日）。
 - `priceRowAt(rows, date)`: 適用開始日が `date` 以前の行のうち、適用開始日がもっとも新しい行（入力の順に依存しない）。
 - `unitPriceFor(customer, row)`: 特約店は `floor(単価 × 90 / 100)`。
 - `lineAmount(unitPrice, quantity)`: `単価 × 数量`。数量 100 以上なら `金額 − floor(金額 × 5 / 100)`。

@@ -6,7 +6,7 @@
 // output, so claims about the tests can be checked.
 // Spends subscription usage (Opus); --dry-run builds the prompts and counts them.
 // Results: <stamp>.grades.jsonl, one line per document; a rerun skips what it has.
-import { appendFile, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,10 +14,10 @@ import { parseArgs } from 'node:util'
 
 import { query } from '@anthropic-ai/claude-agent-sdk'
 
+import { DOCS, readProduct } from './docs'
 import { assertNoSecret, checkHostEnv, runEnv } from './env'
 import { scenarioDir, SCENARIOS } from './scenarios'
 import { TASKS } from './tasks'
-import type { StageId } from './scenarios/types'
 
 const { values: args, positionals } = parseArgs({
   allowPositionals: true,
@@ -29,37 +29,11 @@ const { values: args, positionals } = parseArgs({
   },
 })
 
-// Which rubric grades which product of which stage.
-const DOCS: { stage: StageId; rubric: string; paths: string[] }[] = [
-  { stage: 'requirements', rubric: 'requirements.md', paths: ['docs/requirements.md'] },
-  { stage: 'design', rubric: 'design.md', paths: ['docs/design.md'] },
-  { stage: 'test', rubric: 'tests.md', paths: ['test/'] },
-  { stage: 'report', rubric: 'spec.md', paths: ['docs/spec.md'] },
-  { stage: 'report', rubric: 'report.md', paths: ['docs/report.md'] },
-]
 const MAX_DOC = 60_000 // characters of one document shown to the grader
 
 type Row = { task: string; arm: string; rep: number; artifacts: string | null }
 // A rubric (file path), the products it grades, and where to read them.
 type Job = { row: Row; rubric: string; paths: string[]; root: string; key: string }
-
-const exists = (p: string) => stat(p).then(() => true, () => false)
-
-// The text of a product: one file, or every file under a directory.
-const readProduct = async (root: string, path: string): Promise<string | undefined> => {
-  const p = join(root, path.replace(/\/$/, ''))
-  if (!(await exists(p))) return undefined
-  if (!path.endsWith('/')) return readFile(p, 'utf8')
-  const parts: string[] = []
-  const walk = async (dir: string, rel: string) => {
-    for (const e of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (e.isDirectory()) await walk(join(dir, e.name), `${rel}${e.name}/`)
-      else parts.push(`--- ${path}${rel}${e.name}\n${await readFile(join(dir, e.name), 'utf8')}`)
-    }
-  }
-  await walk(p, '')
-  return parts.join('\n\n')
-}
 
 const items = (rubric: string) =>
   [...rubric.matchAll(/^- ([A-Z]\d+): (.+)$/gm)].map(m => ({ id: m[1]!, text: m[2]! }))

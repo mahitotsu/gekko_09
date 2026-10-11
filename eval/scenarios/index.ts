@@ -26,7 +26,7 @@ export const copyPath = async (from: string, to: string, path: string) => {
 }
 
 // The starting workspace, with the model output of `before` copied in.
-const prepare = (s: Scenario, before: readonly Stage[]) => async (cwd: string) => {
+export const prepare = (s: Scenario, before: readonly Stage[]) => async (cwd: string) => {
   const dir = scenarioDir(s.id)
   await cp(join(dir, 'workspace'), cwd, { recursive: true })
   await cp(join(dir, 'materials'), join(cwd, 'docs', '資料'), { recursive: true })

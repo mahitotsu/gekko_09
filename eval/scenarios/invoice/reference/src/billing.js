@@ -19,8 +19,10 @@ export function billingPeriod(month, closingDay) {
   const [y, m] = month.split('-').map(Number)
   if (closingDay === '末') return { start: `${y}-${pad(m)}-01`, end: `${y}-${pad(m)}-${pad(lastDay(y, m))}` }
   const d = Number(closingDay)
-  const [py, pm] = previousMonth(month).split('-')
-  return { start: `${py}-${pm}-${pad(d + 1)}`, end: `${y}-${pad(m)}-${pad(d)}` }
+  // 前月の締め日の翌日。平年の2月28日締めの翌日は3月1日になる（2月29日はない）。
+  const next = new Date(Date.UTC(y, m - 2, d + 1))
+  const start = `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}`
+  return { start, end: `${y}-${pad(m)}-${pad(d)}` }
 }
 
 // 端数処理: 金額 × 税率(%) / 100 を、顧客の方法で整数にする。整数演算で行う。

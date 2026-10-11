@@ -67,7 +67,7 @@ const ensureDatasets = async (hidden: string) => {
 }
 
 // The hidden acceptance tests, run in a workspace that has src/ (and package.json).
-const acceptance = async (scenario: string, cwd: string) => {
+export const acceptance = async (scenario: string, cwd: string) => {
   const hidden = join(scenarioDir(scenario), 'hidden')
   await ensureDatasets(hidden)
   await cp(join(hidden, 'acceptance.test.js'), join(cwd, 'test-hidden', 'acceptance.test.js'))
@@ -78,7 +78,7 @@ const acceptance = async (scenario: string, cwd: string) => {
 }
 
 // Acceptance on a snapshot of src/ (a checkpoint), in a scratch workspace.
-const acceptanceOn = async (scenario: string, srcDir: string) => {
+export const acceptanceOn = async (scenario: string, srcDir: string) => {
   if (!(await exists(srcDir))) return undefined
   const ws = await mkdtemp(join(tmpdir(), 'grade-checkpoint-'))
   try {

@@ -9,6 +9,8 @@ test('締め期間: 末締めは暦月、日付締めは前月の締め日の翌
   assert.deepEqual(billingPeriod('2026-09', '1'), { start: '2026-08-02', end: '2026-09-01' })
   assert.deepEqual(billingPeriod('2027-01', '15'), { start: '2026-12-16', end: '2027-01-15' })
   assert.deepEqual(billingPeriod('2028-02', '末'), { start: '2028-02-01', end: '2028-02-29' })
+  assert.deepEqual(billingPeriod('2027-03', '28'), { start: '2027-03-01', end: '2027-03-28' })
+  assert.deepEqual(billingPeriod('2028-03', '28'), { start: '2028-02-29', end: '2028-03-28' })
   assert.equal(previousMonth('2027-01'), '2026-12')
 })
 
