@@ -152,9 +152,37 @@ const opusSub: Arm = {
   setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), SUBAGENT_CLAUDE_MD),
 }
 
+// `opusplan` as the user runs it (docs/plan.md, P4): the same CLAUDE.md rule
+// as ~/.claude/CLAUDE.md, so the agent chooses when to plan. Nobody is there to
+// approve, so canUseTool answers: ExitPlanMode and the plan file are allowed,
+// everything else that reaches it is denied, as in the other arms.
+const PLAN_CLAUDE_MD = `- 新しい機能の実装、複数のファイルにまたがる変更、設計が絡む依頼は、作業を始める前に EnterPlanMode で計画モードに入り、計画を立ててから実行してください。
+- 値を聞く質問や、1か所の小さな修正は、計画なしで進めてください。
+`
+
+const opusPlan: Arm = {
+  name: 'opusplan',
+  plugins: ['eval-probe'],
+  options: (cwd, env) =>
+    withProbe({
+      ...base(cwd, env),
+      model: 'opusplan',
+      settingSources: ['project'], // the workspace's CLAUDE.md
+      canUseTool: async (tool, input) => {
+        const file = typeof input.file_path === 'string' ? input.file_path : ''
+        if (tool === 'ExitPlanMode' || tool === 'EnterPlanMode') return { behavior: 'allow', updatedInput: input }
+        // The plan file lives under the run's own HOME (.claude/plans/).
+        if ((tool === 'Write' || tool === 'Edit') && file.includes('/.claude/plans/')) return { behavior: 'allow', updatedInput: input }
+        return { behavior: 'deny', message: 'この実行には承認する人がいません。計画モードでは計画だけを書き、ExitPlanMode で計画を確定してください。' }
+      },
+    }),
+  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), PLAN_CLAUDE_MD),
+}
+
 const ARMS: Arm[] = [
   fixed('opus', 'claude-opus-5-5'),
   opusSub,
+  opusPlan,
   routed('routed', {}),
   routed('routed-switch', { docs: 'switch' }),
   routed('routed-haiku', { base: 'haiku' }),
