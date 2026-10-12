@@ -112,6 +112,8 @@ type Arm = {
   plugins: string[]
   experiment?: boolean
   options: (cwd: string, env: Record<string, string>) => Options
+  // Files the arm adds to the workspace before the session starts.
+  setup?: (cwd: string) => Promise<void>
 }
 
 const fixed = (name: string, model: string, extra: Partial<Options> = {}): Arm => ({
@@ -129,8 +131,30 @@ const routed = (name: string, router: RouterOptions): Arm => ({
     withProbe(withRouter({ ...base(cwd, env), model: 'claude-opus-5-5' }, { classifier: 'hybrid', ...router })),
 })
 
+// Opus on the main loop, subagents on Sonnet by settings alone, and a user
+// CLAUDE.md that hands research to Explore (on the Pro plan, Claude Code
+// spawns subagents only when the user asks; docs/plan.md, P4).
+const SUBAGENT_CLAUDE_MD = `# 作業の進め方
+
+- 資料やコードを広く読んで要点だけが要る調べ物は、Explore サブエージェントに任せてください。生の内容をこの会話に持ち込まず、要点だけを受け取るためです。
+- 1つのファイルを読むだけで済む確認は、自分で行ってください。
+`
+
+const opusSub: Arm = {
+  name: 'opus-sub',
+  plugins: ['eval-probe'],
+  options: (cwd, env) =>
+    withProbe({
+      ...base(cwd, { ...env, CLAUDE_CODE_SUBAGENT_MODEL: 'sonnet', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1' }),
+      model: 'claude-opus-5-5',
+      settingSources: ['project'], // the workspace's CLAUDE.md; the workspaces have no .claude/
+    }),
+  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), SUBAGENT_CLAUDE_MD),
+}
+
 const ARMS: Arm[] = [
   fixed('opus', 'claude-opus-5-5'),
+  opusSub,
   routed('routed', {}),
   routed('routed-switch', { docs: 'switch' }),
   routed('routed-haiku', { base: 'haiku' }),
@@ -242,6 +266,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
   const home = await mkdtemp(join(tmpdir(), `eval-home-`))
   if (task.prepare) await task.prepare(cwd)
   else await cp(here(`./${task.fixture ?? 'fixture'}`), cwd, { recursive: true })
+  await arm.setup?.(cwd)
   const prompts = typeof task.prompt === 'string' ? [task.prompt] : task.prompt
   // Kept documents and snapshots: <results>.artifacts/<task>/<arm>/<rep>/
   const artifactsRel = join(`${basename(out, '.jsonl')}.artifacts`, task.id, arm.name, String(rep))
@@ -361,6 +386,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
 const envOnly = async (arm: Arm) => {
   const cwd = await mkdtemp(join(tmpdir(), `eval-env-${arm.name}-`))
   const home = await mkdtemp(join(tmpdir(), `eval-home-`))
+  await arm.setup?.(cwd)
   const q = query({ prompt: 'hi', options: arm.options(cwd, await runEnv(home)) })
   try {
     for await (const m of q) {
