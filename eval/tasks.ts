@@ -168,6 +168,20 @@ export const TASKS: Task[] = [
     grade: { kind: 'rubric', rubric: 'rubric/d2-csv-design.md', doc: 'docs/csv-design.md' },
   },
   {
+    id: 'd3-cart-guide',
+    level: 'medium',
+    prompt:
+      'src/cart.js の Cart を、使う側の開発者向けに説明する文書を docs/cart-guide.md に書いて。公開メソッドの使い方、金額の計算の順序、使うときの注意点を入れて。コードは変えないで。',
+    grade: { kind: 'rubric', rubric: 'rubric/d3-cart-guide.md', doc: 'docs/cart-guide.md' },
+  },
+  {
+    id: 'd4-coupon-spec',
+    level: 'medium',
+    prompt:
+      'カートに、クーポンを複数枚つかったときのルール（併用できるか、枚数の上限、割引を適用する順序）を決めたい。仕様のたたき台を docs/coupon-spec.md に書いて。実装はしないで。',
+    grade: { kind: 'rubric', rubric: 'rubric/d4-coupon-spec.md', doc: 'docs/coupon-spec.md' },
+  },
+  {
     id: 'm4-tax-rounding',
     level: 'medium',
     prompt: 'addTax の結果がコメントに書かれた仕様どおりになっていないらしい。確認して直して。',
@@ -240,6 +254,8 @@ const SMALL: Record<string, [WorkKind, 'dev' | 'final']> = {
   's3-timeout-env': ['small-change', 'final'],
   'd1-inventory-design': ['design', 'dev'],
   'd2-csv-design': ['design', 'final'],
+  'd3-cart-guide': ['design', 'dev'],
+  'd4-coupon-spec': ['design', 'dev'],
   'm3-csv-quotes': ['implement', 'dev'],
   'h3-coupons': ['implement', 'dev'],
   'h4-holidays': ['implement', 'final'],
