@@ -368,6 +368,8 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
           stopReason: m.stop_reason,
           errors: m.subtype === 'success' ? [] : m.errors,
         })
+        // opusplan: the plan file may be rewritten each turn, so keep a copy per turn.
+        await cp(join(home, '.claude', 'plans'), join(artifacts, 'plans', `turn-${turns.length}`), { recursive: true }).catch(() => undefined)
         const paths = task.snapshots?.[turns.length - 1]
         if (paths) {
           await snapshot(cwd, artifacts, turns.length, paths)
