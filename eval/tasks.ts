@@ -64,6 +64,20 @@ export const TASKS: Task[] = [
     grade: { kind: 'answer', check: r => r.match(/\d+/)?.[0] === '3' },
   },
   {
+    id: 'q1-cart-overflow',
+    level: 'medium',
+    prompt:
+      '新しい Cart に、add("A", 100, 30) を呼び、続けて add("A", 100, 30) を呼ぶ。2回目は上限を超えて例外になる。その後に count() を呼ぶといくつ？コードを読んで、実行しないで、数字だけ答えて。',
+    grade: { kind: 'answer', check: r => r.replace(/,/g, '').match(/\d+/)?.[0] === '60' },
+  },
+  {
+    id: 'q2-coupon-total',
+    level: 'medium',
+    prompt:
+      '新しい Cart に add("X", 1980, 1) を呼び、applyCoupon("S", 10) と applyCoupon("T", 20) をこの順に呼ぶ。そのあと total() はいくつ？コードを読んで、実行しないで、数字だけ答えて。',
+    grade: { kind: 'answer', check: r => r.replace(/,/g, '').match(/\d+/)?.[0] === '1568' },
+  },
+  {
     id: 'm1-negative-yen',
     level: 'medium',
     prompt: 'formatYen にマイナスの金額を渡すと "¥-1,200" になってしまう。"-¥1,200" の形式にして。',
@@ -247,6 +261,8 @@ const SMALL: Record<string, [WorkKind, 'dev' | 'final']> = {
   'e2-addtax-file': ['investigate', 'dev'],
   'e3-todos': ['investigate', 'final'],
   'e4-formatyen-calls': ['investigate', 'dev'],
+  'q1-cart-overflow': ['investigate', 'dev'],
+  'q2-coupon-total': ['investigate', 'dev'],
   'm1-negative-yen': ['small-change', 'dev'],
   'm2-cart-clear': ['small-change', 'final'],
   's1-max-cart': ['small-change', 'dev'],
