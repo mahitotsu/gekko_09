@@ -78,6 +78,32 @@ export const TASKS: Task[] = [
     grade: { kind: 'answer', check: r => r.replace(/,/g, '').match(/\d+/)?.[0] === '1568' },
   },
   {
+    id: 'j1-reserve-race',
+    level: 'medium',
+    prompt:
+      'Inventory.reserve を、同じ sku に対して await せずに続けて2回呼ぶ。在庫が1のとき、どうなる？結果と、その原因を、コードの箇所を挙げて、3文以内で説明して。コードは変えないで。',
+    grade: {
+      kind: 'answer',
+      // Both calls succeed, and the cause is the gap between get and set.
+      check: r =>
+        /(両方|2(件|回|つ)とも|どちらも|二重|2重)/.test(r) &&
+        /(get.{0,40}set|set.{0,40}get|読(み|ん)?.{0,20}書|間に|競合|レース|race|アトミック|排他|割り込)/i.test(r),
+    },
+  },
+  {
+    id: 'j2-cart-fix',
+    level: 'medium',
+    prompt:
+      'Cart.add で、上限を超えて例外になったときに、既存の行の数量が増えたまま残る。これを直す方針を決めて、どこをどう変えるかと、その理由を、3文以内で答えて。コードは変えないで。',
+    grade: {
+      kind: 'answer',
+      // The check must come before the quantity is added, and the existing line must be mentioned.
+      check: r =>
+        /(足す前|加算する前|増やす前|変更する前|更新する前|先に.{0,20}(検査|チェック|判定)|(検査|チェック|判定).{0,20}先|前に.{0,20}(検査|チェック|判定|throw|例外))/.test(r) &&
+        /(既存|同じ sku|同じSKU|すでに.{0,10}行|行オブジェクト|line)/.test(r),
+    },
+  },
+  {
     id: 'm1-negative-yen',
     level: 'medium',
     prompt: 'formatYen にマイナスの金額を渡すと "¥-1,200" になってしまう。"-¥1,200" の形式にして。',
@@ -263,6 +289,8 @@ const SMALL: Record<string, [WorkKind, 'dev' | 'final']> = {
   'e4-formatyen-calls': ['investigate', 'dev'],
   'q1-cart-overflow': ['investigate', 'dev'],
   'q2-coupon-total': ['investigate', 'dev'],
+  'j1-reserve-race': ['investigate', 'dev'],
+  'j2-cart-fix': ['investigate', 'dev'],
   'm1-negative-yen': ['small-change', 'dev'],
   'm2-cart-clear': ['small-change', 'final'],
   's1-max-cart': ['small-change', 'dev'],
