@@ -16,8 +16,9 @@
 // platform.claude.com/docs/en/about-claude/pricing (checked 2026-10-10).
 // Cache writes cost 1.25x input for the 5-minute TTL and 2x for the 1-hour
 // TTL; cache reads are 0.05x input on Opus 5.5 and Sonnet 5.5, 0.1x on Haiku.
-// (The SDK's bundled table prices Sonnet 5.5 reads at $0.20, so its
-// total_cost_usd runs high on Sonnet.)
+// (The SDK's bundled table priced Sonnet 5.5 reads at $0.20 up to 0.3.295, so
+// its total_cost_usd ran high on Sonnet. 0.3.302 has the $0.10 entry; an older
+// SDK still logs the old price, so recompute from tokens as this file does.)
 type Price = { input: number; output: number; cacheRead: number }
 
 export const PRICES: Record<string, Price> = {

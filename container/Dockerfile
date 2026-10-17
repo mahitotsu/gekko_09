@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 
 WORKDIR /work
 COPY package.json package-lock.json ./
-# Exact versions from the lockfile: @anthropic-ai/claude-agent-sdk 0.3.295
-# ships Claude Code 2.1.295 as its native binary.
+# Exact versions from the lockfile: @anthropic-ai/claude-agent-sdk 0.3.302
+# ships Claude Code 2.1.302 as its native binary.
 RUN npm ci --no-audit --no-fund && npm cache clean --force
 
 COPY . .
