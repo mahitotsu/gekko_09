@@ -186,8 +186,58 @@ const PLAN_CLAUDE_MD = `# 計画モードの使い方
 - 短くてかまいませんが、決める点は省かないでください。
 `
 
-const opusPlan: Arm = {
-  name: 'opusplan',
+// CLAUDE.md variants for the entry-rule check (docs/plan.md, P4). Only the
+// "入る / 入らない / 迷ったとき" part differs from PLAN_CLAUDE_MD.
+const planMd = (rules: string) => `# 計画モードの使い方
+
+計画モードに入ると、計画の間は Opus が応答します（計画ファイルしか書けません）。実行は Sonnet が行います。
+
+## 判断の基準
+
+最初の判断（何を作るか、どう解釈するか、何を書くか）を誤ると後の作業がやり直しになる依頼は、作業の前に計画モードに入ってください。判断が要らない依頼や、後から直せる依頼は、そのまま進めてください。
+
+${rules}
+
+## 計画に書くこと
+
+- 文書: 構成、各節で書く要点とその根拠（資料のどこか）、漏れやすい観点、資料どうしが食い違うときにどちらを採るか。
+- 実装: 依頼や資料で解釈が分かれる点の決定と理由、変更するファイルと手順、確かめ方。
+- 短くてかまいませんが、決める点は省かないでください。
+`
+
+// B: decide by what the request shows (deliverables, sources, design decisions).
+const PLAN_CLAUDE_MD_B = planMd(`## 入る
+
+- 成果物が複数になる依頼（文書と実装とテストなど）。
+- 資料が複数にまたがる依頼（複数の資料を読んでまとめる、食い違いを整理する）。
+- 設計の判断が要る依頼。
+
+## 入らない
+
+- 単一の文書、単一のファイルの修正、値や場所を聞く質問。
+- 作業の途中の短い続きの指示、計画を承認した後の実行。
+- すでに多くの往復をした会話での小さな依頼。
+
+## 迷ったとき
+
+- 上の「入る」の条件に当たるなら入る。当たらなければ入らない。`)
+
+// B2: the same cues, but "a chance of it" is enough; the exclusions are firm.
+const PLAN_CLAUDE_MD_B2 = planMd(`## 入る
+
+- 次のどれかに当たる可能性が少しでもあるなら入る: 成果物が複数になる（文書と実装とテストなど）、資料が複数にまたがる、設計の判断が要る。
+
+## 入らない（迷っても入らない）
+
+- 質問、1か所の修正、作業の途中の短い続きの指示、計画を承認した後の実行、すでに多くの往復をした会話での小さな依頼。
+
+## 迷ったとき
+
+- 「入る」の条件に当たる可能性が少しでもあるなら入る。ただし、「入らない」の依頼に当たるときは入らない。`)
+
+// stopAtPlan: ExitPlanMode is refused with "stop here" (an interrupt makes the SDK throw), so only the entry decision and the plan are paid for.
+const planArm = (name: string, md: string, stopAtPlan: boolean): Arm => ({
+  name,
   plugins: ['eval-probe'],
   options: (cwd, env) =>
     withProbe({
@@ -196,19 +246,28 @@ const opusPlan: Arm = {
       settingSources: ['project'], // the workspace's CLAUDE.md
       canUseTool: async (tool, input) => {
         const file = typeof input.file_path === 'string' ? input.file_path : ''
+        if (tool === 'ExitPlanMode' && stopAtPlan) return { behavior: 'deny', message: '計画を確認した。ここで終了する。これ以上ツールは呼ばず、「確認した」と一言だけ答えて終えてください。' }
         if (tool === 'ExitPlanMode' || tool === 'EnterPlanMode') return { behavior: 'allow', updatedInput: input }
         // The plan file lives under the run's own HOME (.claude/plans/).
         if ((tool === 'Write' || tool === 'Edit') && file.includes('/.claude/plans/')) return { behavior: 'allow', updatedInput: input }
         return { behavior: 'deny', message: 'この実行には承認する人がいません。計画モードでは計画だけを書き、ExitPlanMode で計画を確定してください。' }
       },
     }),
-  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), PLAN_CLAUDE_MD),
-}
+  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), md),
+})
+
+const opusPlan = planArm('opusplan', PLAN_CLAUDE_MD, false)
+const planA = planArm('plan-a', PLAN_CLAUDE_MD, true)
+const planB = planArm('plan-b', PLAN_CLAUDE_MD_B, true)
+const planB2 = planArm('plan-b2', PLAN_CLAUDE_MD_B2, true)
 
 const ARMS: Arm[] = [
   fixed('opus', 'claude-opus-5-5'),
   opusSub,
   opusPlan,
+  planA,
+  planB,
+  planB2,
   routed('routed', {}),
   routed('routed-switch', { docs: 'switch' }),
   routed('routed-haiku', { base: 'haiku' }),
