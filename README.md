@@ -1,157 +1,68 @@
-# model-router：Claude Agent SDK でターンごとに Opus / Sonnet / Haiku を切り替える
+# opusplan を CLAUDE.md で運用する
 
-Claude Code の mod（関数フック）で、AI エージェントがターンごと・サブエージェントごとに Claude Opus 5.5 / Sonnet 5.5 / Haiku 5.5 を使い分けるようにし、その効果を測りました。
+Claude Code の `opusplan`（計画は Opus、実行は Sonnet）を、CLAUDE.md の基準で使い分けると、Opus 単独と比べて何が得られ、何を失うかを測りました。このリポジトリには、結論、設定のサンプル、測定の結果、再現用の評価（Agent SDK）があります。
 
-mod は、Claude Code の内部イベントに JavaScript / TypeScript の関数でフックするプラグインです。Agent SDK でもフックが動きます（画面への描画はしません）。詳しくは公式ドキュメントを参照してください。
+## 結論
 
-- [Mods overview](https://code.claude.com/docs/en/plugins/mods/overview)
-- [React to events: Follow a turn](https://code.claude.com/docs/en/plugins/mods/events#follow-a-turn)（今回使った `turn.step` などのイベント）
-- [Mods reference](https://code.claude.com/docs/en/plugins/mods/reference)
-
-## やったこと
-
-### 1. ルーティングの実装
-
-[plugins/model-router/](plugins/model-router/) は、次のフックで動きます。
-
-| フック | 役割 |
-| --- | --- |
-| `turn.start` | 依頼文から難易度を判定する |
-| `turn.step` | メインループの各リクエストの `model` と `effort` を、判定結果に差し替える |
-| `agent.spawn` | モデルを指定していない組み込みのサブエージェントに、モデルを割り当てる（Explore は Haiku、general-purpose は Sonnet、Plan は Opus） |
-| `prompt.submit` | 依頼文の先頭の `[opus]` / `[sonnet]` / `[haiku]` で、そのターンのモデルを指定できる |
-
-```ts
-on('turn.step', async function* ($, e, next) {
-  const tier = await decisions.get(e.turnId) // turn.start で判定済み
-  return yield* next({ ...e, model: MODEL_ID[tier], effort: EFFORT[tier] })
-})
-```
-
-- **判定**: キーワードと文の長さで判定し、確信が持てないときだけ Haiku に判定させます（1回 $0.001 未満）。ルールは [hooks/policy.ts](plugins/model-router/hooks/policy.ts) にあります。
-- **キャッシュへの配慮**: プロンプトキャッシュはモデルごとに別なので、切り替えはターン単位にしています。また、会話が 40K トークンを超えたら下位モデルへは切り替えません。
-
-### 2. 振り分けの検証
-
-| 対象 | 方法 |
-| --- | --- |
-| フックの動作 | 単体テスト10件（`claude plugin test`、API 呼び出しなし） |
-| 実際に応答したモデル | Opus を指定したセッションで軽い依頼を出し、API の応答の `message.model` を確認 |
-| 評価の全実行 | ルーターの判定と、SDK が報告した課金モデル（`result.modelUsage`）を照合（[eval/check-routing.ts](eval/check-routing.ts)） |
-
-### 3. コスト・レイテンシ・品質の評価
-
-- **タスク**: 小さな JavaScript ライブラリに対する18タスクです。内訳は easy 4、medium 4、hard 4、expert 6 です。
-  - easy は回答文で採点します。
-  - それ以外は、エージェントの作業後に隠しテストを追加して採点します。
-  - expert は仕様書付きのタスクで、semver の範囲判定、数式の評価器、不具合調査、全角を考慮した折り返しと禁則処理、LRU と TTL を組み合わせたキャッシュ、トポロジカルソートです。
-- **比較した4通り**: Opus 単独、Opus ＋ model-router（routed）、effort を low にした Opus、Sonnet 単独。
-- **条件**:
-  - 実行ごとに新しい作業ディレクトリを使い、ユーザー設定は読み込ませていません（`settingSources: []`）。
-  - 4通りを交互に実行し、各タスク1回、計72回です。
-  - コストは SDK の `total_cost_usd`（定価換算）、レイテンシは `duration_ms` です。
-
-## わかったこと
-
-### 振り分けは判定どおりに動く
-
-- 単体テストはすべて合格しました。
-- Opus を指定したセッションで軽い依頼を出すと、実際の応答は `claude-haiku-5-5` が返しました。
-- 評価の72回で、判定と課金モデルの不一致は0件でした。
-  - Claude Code 本体が毎回行う補助的な Haiku 呼び出し（コストの 0.2% 未満）は、照合から除いています。
-
-### コストとレイテンシは下がる
-
-| 比較対象 | 合格 | 合計コスト | レイテンシ中央値 | 合計レイテンシ |
-| --- | --- | --- | --- | --- |
-| routed | 18/18 | **$1.237** | 22.6秒 | **387秒** |
-| Opus 単独 | 18/18 | $2.966 | 32.4秒 | 589秒 |
-| Opus（effort low） | 17/18 ※ | $2.432 | 20.1秒 | 427秒 |
-| Sonnet 単独 | 18/18 | $1.555 | **18.6秒** | 431秒 |
-
-※ 不合格の1件は、確認用のコマンドが権限設定で拒否されたことによるものです。
-
-| 難易度 | routed | Opus 単独 | Opus（effort low） | Sonnet 単独 | routed の振り分け先 |
-| --- | --- | --- | --- | --- | --- |
-| easy | **$0.010** | $0.290 | $0.296 | $0.242 | Haiku 4 |
-| medium | **$0.144** | $0.589 | $0.460 | $0.266 | Haiku 2、Sonnet 2 |
-| hard | $0.406 | $0.663 | $0.603 | **$0.320** | Sonnet 3、Opus 1 |
-| expert | **$0.678** | $1.424 | $1.072 | $0.727 | Sonnet 5、Opus 1 |
-
-- **Opus 単独と比べると**: 合計コストが 58%、合計レイテンシが 34% 減りました。
-- **効果の大部分は、軽い依頼を Haiku に回したことによります。** エージェントは毎回、システムプロンプトとツール定義を送ります。この固定費が大きく、その単価がモデルによって最大40倍違うためです。
-- **Opus の effort を下げても、コストはあまり下がりません**（Opus 単独の 82%）。上の固定費が減らないためです。
-- **Sonnet 単独と比べると**: 合計コストは 20% 低くなりました。ただし、レイテンシの中央値と hard のコストでは、Sonnet 単独のほうが上回りました。
-
-### 品質の維持は評価しきれていない
-
-- **4通りとも、ほぼ全問に合格しました。** 今回のタスクは Sonnet でも解ける難しさで、「難しい依頼を Opus に回すことで品質を保てるか」は確かめられていません。モデル間で差が出るタスク（大きなコードベースの読解、曖昧な要求、長い作業など）での評価が必要です。
-- **サブエージェントの振り分けと下げ止めは、単体テストでしか確かめていません。**
-- **各タスク1回の実行なので、ばらつきは評価していません。**
-
-## その後：方針の転換と `opusplan` の検証
-
-上の router は、ターンの途中でメインのモデルを切り替えます。その後の測定（詳細は [docs/plan.md](docs/plan.md) の P4）で、運用は `opusplan`（計画は Opus、実行は Sonnet）と、計画モードに入る基準を書いた CLAUDE.md に切り替えました。測定は、結論の条件を先に決めて、それを満たしたところで終えています。
-
-### やったこと
-
-- Sonnet のサブエージェントと、Sonnet が書いた文書を Opus が見直す形を測った。
-- `opusplan` を評価に加え（`eval/run.ts`）、次を測った。人がいないので、計画モードの出入りと計画ファイルの書き込みだけを許可し、計画はターンごとに残した。
-  - invoice の要件定義・設計書（`opusplan` 各5回、Opus 単独 各3回）と、小さな文書（Cart の利用ガイド、クーポン併用の仕様など）。
-  - 質問（簡単な 2 件、コードを追う 2 件、原因・方針の判断を含む 2 件）。
-  - 通し（invoice の auto を `opusplan` と Opus 単独で各3回、script を 1 回）。
-
-### わかったこと
-
-- **仕組みは期待どおり動く。** 文書の依頼は計画モードに入り（計画中は Opus、実行は Sonnet）、質問は入らず Sonnet だけで答える。計画には構成、各節の要点と根拠、食い違いの採り方、テストの観点まで書かれた。
-- **質問は安い。** 費用は Opus 単独の 25〜75% 減。コードを追う質問、原因・方針の判断を含む質問でも、Sonnet のままで要点は落ちなかった（Opus 単独と 6/6 で同じ）。ただし、Opus 単独は「別の欠陥にも気づく」ことが多かった（3 回中 3 回、`opusplan` は 3 回中 1 回）。
-- **長い作業では時間も費用も下がる。** 通し（auto）は、`opusplan` が Opus 単独の 0.61 倍の時間と費用（中央値で 413 秒・$1.69 と 676 秒・$2.79）。各 3 回、すべて合格。
-- **短い作業では効果が出ない。** 小さな文書は費用が 1.5〜2 倍、時間も同じかやや長い。要件定義・設計書でも、時間は同じで、費用は 1.1〜1.2 倍。
-- **文書は Opus に近づくが、並ばない。** 採点は満点だが、順番を入れ替えた比較では、Opus の勝ち 2、`opusplan` の勝ち 0、残りは割れや引き分け。Sonnet 単独に対しては、要件定義で良く、設計書では負ける回があった。
-- **サブエージェントも見直しも、Opus には届かない。** Sonnet のサブエージェントは費用も時間も下がらず、見直しでも文書は Opus に負けたままだった。
-- **未確認：** 通し script の繰り返し（1 回は不合格で、原因は分けられなかった）、Pro 以外のプランでのサブエージェント、実際の VS Code での計画モードに入る頻度の長期の集計。
-
-- **CLAUDE.md の書き方の調整は、現在のもので足りた。** 入る基準を「成果物の数・資料の数・設計の判断」の手がかりで書き直した案（B）は、既存コードを説明する単一の文書で入らなくなった（開発用で良くなった）が、設計の判断が要る単一の文書で入りそこねる回が出て、取っておいた課題で現在の書き方を下回った。質問や1か所の修正で入ることは、どの書き方でも起きなかった（40回すべて入らず）。「可能性が少しでもあるなら入る」と緩めても、質問への入りすぎは起きなかった。
+- **仕組みは期待どおり動きます。** CLAUDE.md に「計画モードに入る基準」を書いておくと、エージェント（Sonnet）が必要なときに自分で計画モードに入ります。計画中だけ Opus が応答し、承認の後の実行は Sonnet に戻ります。画面で権限モードを plan に切り替えておく必要も、最初に入る必要もありません。質問や1か所の修正では入らず、Sonnet だけで答えます。
+- **長い作業では、時間も費用も下がります。** 要件定義から報告書までを1回の依頼で作る通しの作業（invoice の auto）は、Opus 単独の 0.61 倍の時間と費用でした（各3回、すべて合格）。
+- **質問は安くなります。** 費用は Opus 単独より 25〜75% 低くなります（Sonnet が答えるため）。コードを追う質問、原因・方針の判断を含む質問でも、必要な要点は落ちませんでした。ただし、Opus 単独は「ついでに別の欠陥に気づく」ことが多くありました。
+- **短い作業は割高です。** 小さな文書（設計メモ、利用ガイド）では、費用が Opus 単独の約 1.7〜1.8 倍、時間が 1.0〜1.6 倍です。計画の書き出しと、切り替えのたびのキャッシュの書き直しが、Sonnet で書く分の節約を上回ります。
+- **文書の質は、Opus に近づきますが並びません。** 要件定義・設計書は採点で満点でしたが、順番を入れ替えた比較では、Opus 単独の勝ちが 2、`opusplan` の勝ちが 0、残りは割れや引き分けでした。Sonnet 単独が書いた文書と比べると、要件定義では良い傾向でしたが、設計書では負ける回もありました。
+- **CLAUDE.md の書き方は、サンプルのもので足ります。** 手がかり（成果物の数、資料の数）で書き直した案は、取っておいた課題でサンプルを下回りました。
 
 ### 運用の推奨
 
-- **条件つきで採る。** 質問や小さな修正が多く、ときどき長い実装や通しの作業が入る使い方で、効果が出る。
-- 文書の質を最優先する依頼は、Opus 単独のセッションで書くほうが確実。
-- 小さな文書を続けて書く使い方では、`opusplan` は割高になる。
+条件つきで採ります。
+- 向く使い方: 質問や小さな修正が多く、ときどき長い実装や、複数の資料にまたがる作業が入る。
+- 文書の質を最優先する依頼は、Opus 単独のセッションで書くほうが確実です。
+- 小さな文書を続けて書く使い方では、`opusplan` は割高になります。
 
-## 使い方
+標本は小さく（多くが各 1〜3 回）、傾向の目安です。測定の方法、結果の表、未確認の項目は [docs/findings.md](docs/findings.md) にあります。
 
-Agent SDK では、`plugins` オプションで読み込みます（[src/router.ts](src/router.ts) の `withRouter`）。
+## 設定のサンプル
 
-```ts
-query({
-  prompt,
-  options: {
-    model: 'claude-opus-5-5',
-    plugins: [{ type: 'local', path: './plugins/model-router' }],
-    settings: { pluginConfigs: { 'model-router': { options: { classifier: 'hybrid' } } } },
-  },
-})
-```
+[examples/user/](examples/user/) に、ユーザー単位の設定のサンプルを置いています。
 
-| オプション | 値 | 既定値 |
-| --- | --- | --- |
-| `mainRouting` | `route`、または `fixed`（サブエージェントだけ振り分ける） | `route` |
-| `classifier` | `heuristic` / `hybrid` / `haiku` | `hybrid` |
-| `stickyContextTokens` | 下位モデルへ切り替えない会話の大きさ（トークン） | `40000` |
-| `subagentRouting` | 真偽値 | `true` |
-| `report` | `turn`（ターンごとの判定とコストを `ui_log` に出す） / `off` | `turn` |
+| サンプル | コピー先 | 内容 |
+|---|---|---|
+| [settings.json.example](examples/user/settings.json.example) | `~/.claude/settings.json` | `"model": "opusplan"` |
+| [CLAUDE.md.example](examples/user/CLAUDE.md.example) | `~/.claude/CLAUDE.md` | 計画モードに入る基準（日本語） |
 
-Claude Code では `claude --plugin-dir plugins/model-router` で起動します。`/router-stats` で、モデル別のトークン数と推定コストが見られます。
+- **自動では適用されません。** 拡張子が `.example` で、`.claude/` の外にあるため、Claude Code が読むことはありません。
+- 適用するときは、内容を確かめてから、**手でコピー**してください。`~/.claude/settings.json` や `~/.claude/CLAUDE.md` が既にある場合は、上書きせずに、必要な行を取り込んでください。
+- プロジェクトだけに適用するなら、`.claude/settings.local.json` に `"model": "opusplan"`、プロジェクトの `CLAUDE.md` に同じ内容を置きます。
+- VS Code 拡張では、モデルの選択画面に `opusplan` は出ませんが、`settings.json` の `model` に書けば効きます。
+- 評価（[eval/run.ts](eval/run.ts)）も、同じ `CLAUDE.md.example` を読みます。サンプルを編集すれば、評価の条件も変わります。
 
-## 評価の再現
+## 再現
+
+必要なもの: Docker（または podman）、サブスクリプションの OAuth トークン（`claude setup-token`）。トークンはリポジトリ直下の `.env`（[.env.example](.env.example) を参考）に書きます。`.env` は git に入りません。実行は、サブスクリプションの利用量を消費します。
 
 ```sh
 npm install
-npx tsx eval/run.ts                                 # 全タスク × 4通り（課金が発生します）
-npx tsx eval/report.ts eval/results/*.jsonl         # 集計
-npx tsx eval/check-routing.ts eval/results/*.jsonl  # 判定と課金モデルの照合
-claude plugin test plugins/model-router             # mod の単体テスト
+npm test                                              # 評価の道具のユニットテスト
+container/run.sh                                      # 環境を記録する（モデルの呼び出しなし）
+container/run.sh npx tsx eval/run.ts --arms opus,opusplan --tasks e2-addtax-file,d1-inventory-design --reps 1
+container/run.sh npx tsx eval/run.ts --arms opus,opusplan --tasks invoice/auto --reps 3
+npx tsx eval/report.ts eval/results/<日時>.jsonl      # 費用・時間の集計
+npx tsx eval/grade-docs.ts eval/results/<日時>.jsonl  # 文書の採点（モデルを呼ぶ）
 ```
 
-動作は Claude Code 2.1.295 / Agent SDK 0.3.295 で確認しました。mod の API は early access です。価格（1M トークンあたり、入力 / 出力）は、Opus 5.5 が $4 / $20、Sonnet 5.5 が $2 / $10、Haiku 5.5 が $0.10 / $0.50 です。
+- 課題は [eval/tasks.ts](eval/tasks.ts)、比較対象（arm）は `opus`・`sonnet`・`haiku`・`opusplan`。
+- 結果は `eval/results/`（git に入りません）に出ます。結論の根拠にした結果は [eval/published/](eval/published/) にあります。
+- 動作は Claude Code 2.1.295 / Agent SDK 0.3.295 で確認しました。
+
+## 構成
+
+```
+examples/user/   ユーザー単位の設定のサンプル
+docs/findings.md 測定の方法と結果
+eval/            評価（課題、採点、費用の集計）
+eval/published/  結論の根拠にした結果
+container/       評価を動かすコンテナ
+```
+
+## ライセンス
+
+MIT（[LICENSE](LICENSE)）。
