@@ -39,7 +39,7 @@
 - 採点は全件満点（要件定義 22/22、設計書 14/14）。
 - 比較（`opusplan` 5回、Opus 3回、Sonnet 1回）: 対 Opus は 14 組中、Opus の勝ち 2、`opusplan` の勝ち 0、残りは割れか引き分け。対 Sonnet は 6 組中、`opusplan` の勝ち 2（要件定義）、Sonnet の勝ち 2（設計書）、残りは割れ。
 - 費用（平均）・時間（中央値）: stage-1 は `opusplan` $0.65・118 秒、Opus $0.59・132 秒。stage-2 は `opusplan` $0.74・160 秒、Opus $0.66・181 秒（Opus の1回は 321 秒で外れ値）。費用は Opus 単独の約 1.1 倍、時間はほぼ同じ。
-- 文書は Opus に近づくが並ばない。参考に、Sonnet 単独が書いた文書は Opus 単独に負ける（8 組中 Opus の勝ち 7、割れ 1。判定役 Sonnet。`2026-10-11T05-52-29-193Z.compare.claude-sonnet-5-5.jsonl`）。
+- 文書は Opus に近づくが、上回る組はなかった。参考に、Sonnet 単独が書いた文書は Opus 単独に負ける（8 組中 Opus の勝ち 7、割れ 1。判定役 Sonnet。`2026-10-11T05-52-29-193Z.compare.claude-sonnet-5-5.jsonl`）。
 
 ### 小さな文書（d1 在庫予約の設計、d3 Cart の利用ガイド、d4 クーポン併用の仕様）
 
