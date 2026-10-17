@@ -2,7 +2,6 @@ import type { Scenario } from '../types'
 
 export const invoice: Scenario = {
   id: 'invoice',
-  split: 'dev',
   title: '受注・請求（みなと文具の請求書発行システム）',
   stages: [
     {

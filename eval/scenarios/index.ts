@@ -7,12 +7,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Task } from '../tasks'
-import { attendance } from './attendance/scenario'
-import { expense } from './expense/scenario'
 import { invoice } from './invoice/scenario'
 import type { Scenario, Stage } from './types'
 
-export const SCENARIOS: readonly Scenario[] = [invoice, expense, attendance]
+export const SCENARIOS: readonly Scenario[] = [invoice]
 
 export const scenarioDir = (id: string) => fileURLToPath(new URL(`./${id}/`, import.meta.url))
 
@@ -43,7 +41,6 @@ export const scenarioTasks = (s: Scenario): Task[] => [
   {
     id: `${s.id}/script`,
     level: 'scenario',
-    split: s.split,
     prompt: s.stages.flatMap(promptsOf),
     prepare: prepare(s, []),
     maxTurns: 80,
@@ -53,7 +50,6 @@ export const scenarioTasks = (s: Scenario): Task[] => [
   {
     id: `${s.id}/auto`,
     level: 'scenario',
-    split: s.split,
     prompt: s.autonomousPrompt,
     prepare: prepare(s, []),
     maxTurns: 200,
@@ -63,8 +59,7 @@ export const scenarioTasks = (s: Scenario): Task[] => [
     (stage, i): Task => ({
       id: `${s.id}/stage-${i + 1}`,
       level: 'scenario',
-      split: s.split,
-      prompt: promptsOf(stage),
+        prompt: promptsOf(stage),
       prepare: prepare(s, s.stages.slice(0, i)),
       maxTurns: 80,
       snapshots: snapshotsOf([stage]),

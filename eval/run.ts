@@ -1,5 +1,5 @@
 // Runs every task under every arm and appends one JSON line per run.
-//   npx tsx eval/run.ts [--reps 1] [--concurrency 2] [--arms opus,routed] [--tasks e1-timeout,h1-inventory-race]
+//   npx tsx eval/run.ts [--reps 1] [--concurrency 2] [--arms opus,opusplan] [--tasks e2-addtax-file,invoice/auto]
 //   npx tsx eval/run.ts --resume eval/results/<stamp>.jsonl   (runs only what that file lacks)
 //   npx tsx eval/run.ts --env-only [--arms ...]   (starts each arm's session, records what it loaded, stops before any request)
 // Auth: CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`, in the environment
@@ -24,7 +24,6 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 
-import { routerLine, withRouter, type RouterOptions } from '../src/router'
 import { buildRequests, type ProbeStep, type WriteSplit } from './cost'
 import {
   assertNoSecret,
@@ -46,6 +45,14 @@ const PROBE_DIR = here('./probe')
 const PROBE_PREFIX = 'eval-probe ' // as eval/probe/hooks/register.ts writes it
 const PROBE_SETTINGS = 'eval-probe-settings '
 
+// A hook's log line reaches an SDK host as a `ui_log` message; it is not in
+// the SDK's typed union yet, so it is read loosely.
+const hookLine = (m: SDKMessage): string | undefined => {
+  const any = m as { type?: string; subtype?: string; text?: string; content?: string }
+  const text = any.text ?? any.content
+  return (any.type === 'ui_log' || any.subtype === 'ui_log') && typeof text === 'string' ? text : undefined
+}
+
 const { values: args } = parseArgs({
   options: {
     reps: { type: 'string', default: '1' },
@@ -54,7 +61,6 @@ const { values: args } = parseArgs({
     tasks: { type: 'string' },
     resume: { type: 'string' },
     'env-only': { type: 'boolean', default: false },
-    final: { type: 'boolean', default: false },
   },
 })
 
@@ -84,33 +90,12 @@ const base = (cwd: string, env: Record<string, string>): Options => ({
   persistSession: false,
 })
 
-const withSchedule = (o: Options, schedule: readonly object[]): Options => {
-  const settings = typeof o.settings === 'object' ? o.settings : {}
-  return {
-    ...o,
-    plugins: [...(o.plugins ?? []), { type: 'local', path: here('./schedule') }],
-    settings: {
-      ...settings,
-      pluginConfigs: { ...settings.pluginConfigs, 'eval-schedule': { options: { schedule: JSON.stringify(schedule) } } },
-    },
-  }
-}
-
-const scheduled = (name: string, model: string, schedule: readonly object[]): Arm => ({
-  name,
-  plugins: ['eval-schedule', 'eval-probe'],
-  experiment: true,
-  options: (cwd, env) => withProbe(withSchedule({ ...base(cwd, env), model }, schedule)),
-})
-
 // Every arm loads the probe, last, so it sees each request as sent.
 const withProbe = (o: Options): Options => ({ ...o, plugins: [...(o.plugins ?? []), { type: 'local', path: PROBE_DIR }] })
 
-// `experiment` arms measure one mechanism (P1) and run only when named with --arms.
 type Arm = {
   name: string
   plugins: string[]
-  experiment?: boolean
   options: (cwd: string, env: Record<string, string>) => Options
   // Files the arm adds to the workspace before the session starts.
   setup?: (cwd: string) => Promise<void>
@@ -122,122 +107,15 @@ const fixed = (name: string, model: string, extra: Partial<Options> = {}): Arm =
   options: (cwd, env) => withProbe({ ...base(cwd, env), model, ...extra }),
 })
 
-// The router on a session that starts on Opus (the setup it replaces); the
-// options differ from the hybrid, Sonnet-base, delegate-docs default.
-const routed = (name: string, router: RouterOptions): Arm => ({
-  name,
-  plugins: ['model-router', 'eval-probe'],
-  options: (cwd, env) =>
-    withProbe(withRouter({ ...base(cwd, env), model: 'claude-opus-5-5' }, { classifier: 'hybrid', ...router })),
-})
+// `opusplan` as the user runs it: the model alias plus the user's CLAUDE.md
+// (examples/user/CLAUDE.md.example, the same file), so the agent chooses when to
+// plan. Nobody is there to approve, so canUseTool answers: EnterPlanMode,
+// ExitPlanMode and the plan file are allowed, everything else that reaches it
+// is denied, as in the other arms.
+const USER_CLAUDE_MD = here('../examples/user/CLAUDE.md.example')
 
-// Opus on the main loop, subagents on Sonnet by settings alone, and a user
-// CLAUDE.md that hands research to Explore (on the Pro plan, Claude Code
-// spawns subagents only when the user asks; docs/plan.md, P4).
-const SUBAGENT_CLAUDE_MD = `# 作業の進め方
-
-- 資料やコードを広く読んで要点だけが要る調べ物は、Explore サブエージェントに任せてください。生の内容をこの会話に持ち込まず、要点だけを受け取るためです。
-- 1つのファイルを読むだけで済む確認は、自分で行ってください。
-`
-
-const opusSub: Arm = {
-  name: 'opus-sub',
-  plugins: ['eval-probe'],
-  options: (cwd, env) =>
-    withProbe({
-      ...base(cwd, { ...env, CLAUDE_CODE_SUBAGENT_MODEL: 'sonnet', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1' }),
-      model: 'claude-opus-5-5',
-      settingSources: ['project'], // the workspace's CLAUDE.md; the workspaces have no .claude/
-    }),
-  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), SUBAGENT_CLAUDE_MD),
-}
-
-// `opusplan` as the user runs it (docs/plan.md, P4): a copy of ~/.claude/CLAUDE.md
-// (keep them in step), so the agent chooses when to plan. Nobody is there to
-// approve, so canUseTool answers: ExitPlanMode and the plan file are allowed,
-// everything else that reaches it is denied, as in the other arms.
-const PLAN_CLAUDE_MD = `# 計画モードの使い方
-
-計画モードに入ると、計画の間は Opus が応答します（計画ファイルしか書けません）。実行は Sonnet が行います。
-
-## 判断の基準
-
-最初の判断（何を作るか、どう解釈するか、何を書くか）を誤ると後の作業がやり直しになる依頼は、作業の前に計画モードに入ってください。判断が要らない依頼や、後から直せる依頼は、そのまま進めてください。
-
-## 入る
-
-- 新しい機能の実装、複数のファイルにまたがる変更、設計の判断が絡む依頼。
-- 人が読む文書（要件定義、設計書、仕様書、報告書、調査レポート）を書く依頼。資料や情報を集めてまとめる場合も含みます。
-
-## 入らない
-
-- 値や場所を聞く質問、1か所の小さな修正。
-- 作業の途中の短い続きの指示、計画を承認した後の実行。
-- すでに多くの往復をした会話での小さな依頼。
-
-## 迷ったとき
-
-- 文書を書く依頼なら入る。それ以外は入らない。
-
-## 計画に書くこと
-
-- 文書: 構成、各節で書く要点とその根拠（資料のどこか）、漏れやすい観点、資料どうしが食い違うときにどちらを採るか。
-- 実装: 依頼や資料で解釈が分かれる点の決定と理由、変更するファイルと手順、確かめ方。
-- 短くてかまいませんが、決める点は省かないでください。
-`
-
-// CLAUDE.md variants for the entry-rule check (docs/plan.md, P4). Only the
-// "入る / 入らない / 迷ったとき" part differs from PLAN_CLAUDE_MD.
-const planMd = (rules: string) => `# 計画モードの使い方
-
-計画モードに入ると、計画の間は Opus が応答します（計画ファイルしか書けません）。実行は Sonnet が行います。
-
-## 判断の基準
-
-最初の判断（何を作るか、どう解釈するか、何を書くか）を誤ると後の作業がやり直しになる依頼は、作業の前に計画モードに入ってください。判断が要らない依頼や、後から直せる依頼は、そのまま進めてください。
-
-${rules}
-
-## 計画に書くこと
-
-- 文書: 構成、各節で書く要点とその根拠（資料のどこか）、漏れやすい観点、資料どうしが食い違うときにどちらを採るか。
-- 実装: 依頼や資料で解釈が分かれる点の決定と理由、変更するファイルと手順、確かめ方。
-- 短くてかまいませんが、決める点は省かないでください。
-`
-
-// B: decide by what the request shows (deliverables, sources, design decisions).
-const PLAN_CLAUDE_MD_B = planMd(`## 入る
-
-- 成果物が複数になる依頼（文書と実装とテストなど）。
-- 資料が複数にまたがる依頼（複数の資料を読んでまとめる、食い違いを整理する）。
-- 設計の判断が要る依頼。
-
-## 入らない
-
-- 単一の文書、単一のファイルの修正、値や場所を聞く質問。
-- 作業の途中の短い続きの指示、計画を承認した後の実行。
-- すでに多くの往復をした会話での小さな依頼。
-
-## 迷ったとき
-
-- 上の「入る」の条件に当たるなら入る。当たらなければ入らない。`)
-
-// B2: the same cues, but "a chance of it" is enough; the exclusions are firm.
-const PLAN_CLAUDE_MD_B2 = planMd(`## 入る
-
-- 次のどれかに当たる可能性が少しでもあるなら入る: 成果物が複数になる（文書と実装とテストなど）、資料が複数にまたがる、設計の判断が要る。
-
-## 入らない（迷っても入らない）
-
-- 質問、1か所の修正、作業の途中の短い続きの指示、計画を承認した後の実行、すでに多くの往復をした会話での小さな依頼。
-
-## 迷ったとき
-
-- 「入る」の条件に当たる可能性が少しでもあるなら入る。ただし、「入らない」の依頼に当たるときは入らない。`)
-
-// stopAtPlan: ExitPlanMode is refused with "stop here" (an interrupt makes the SDK throw), so only the entry decision and the plan are paid for.
-const planArm = (name: string, md: string, stopAtPlan: boolean): Arm => ({
-  name,
+const opusPlan: Arm = {
+  name: 'opusplan',
   plugins: ['eval-probe'],
   options: (cwd, env) =>
     withProbe({
@@ -246,57 +124,16 @@ const planArm = (name: string, md: string, stopAtPlan: boolean): Arm => ({
       settingSources: ['project'], // the workspace's CLAUDE.md
       canUseTool: async (tool, input) => {
         const file = typeof input.file_path === 'string' ? input.file_path : ''
-        if (tool === 'ExitPlanMode' && stopAtPlan) return { behavior: 'deny', message: '計画を確認した。ここで終了する。これ以上ツールは呼ばず、「確認した」と一言だけ答えて終えてください。' }
         if (tool === 'ExitPlanMode' || tool === 'EnterPlanMode') return { behavior: 'allow', updatedInput: input }
         // The plan file lives under the run's own HOME (.claude/plans/).
         if ((tool === 'Write' || tool === 'Edit') && file.includes('/.claude/plans/')) return { behavior: 'allow', updatedInput: input }
         return { behavior: 'deny', message: 'この実行には承認する人がいません。計画モードでは計画だけを書き、ExitPlanMode で計画を確定してください。' }
       },
     }),
-  setup: cwd => writeFile(join(cwd, 'CLAUDE.md'), md),
-})
+  setup: async cwd => writeFile(join(cwd, 'CLAUDE.md'), await readFile(USER_CLAUDE_MD, 'utf8')),
+}
 
-const opusPlan = planArm('opusplan', PLAN_CLAUDE_MD, false)
-const planA = planArm('plan-a', PLAN_CLAUDE_MD, true)
-const planB = planArm('plan-b', PLAN_CLAUDE_MD_B, true)
-const planB2 = planArm('plan-b2', PLAN_CLAUDE_MD_B2, true)
-
-const ARMS: Arm[] = [
-  fixed('opus', 'claude-opus-5-5'),
-  opusSub,
-  opusPlan,
-  planA,
-  planB,
-  planB2,
-  routed('routed', {}),
-  routed('routed-switch', { docs: 'switch' }),
-  routed('routed-haiku', { base: 'haiku' }),
-  fixed('opus-low', 'claude-opus-5-5', { effort: 'low' }),
-  fixed('sonnet', 'claude-sonnet-5-5'),
-  fixed('haiku', 'claude-haiku-5-5'),
-  // P1: what a model or effort switch does to the prompt cache. Haiku at its
-  // default effort (medium), switched by eval/schedule at a turn or a step.
-  ...(
-    [
-      ['p1-fixed', []],
-      ['p1-effort', [{ turn: 2, effort: 'low' }, { turn: 4, effort: 'medium' }]],
-      ['p1-midturn', [{ turn: 1, step: 1, effort: 'low' }]],
-      ['p1-model', [{ turn: 2, model: 'claude-sonnet-5-5' }, { turn: 3, model: 'claude-haiku-5-5' }]],
-    ] as const
-  ).map(([name, schedule]) => scheduled(name, 'claude-haiku-5-5', schedule)),
-  // Whether an effort the mod sets mid-conversation reaches the API: turn 2
-  // needs thought, so low and max should differ widely in tokens.
-  scheduled('p1-think-low', 'claude-haiku-5-5', [{ turn: 1, effort: 'medium' }, { turn: 2, effort: 'low' }]),
-  scheduled('p1-think-max', 'claude-haiku-5-5', [{ turn: 1, effort: 'medium' }, { turn: 2, effort: 'max' }]),
-  // The same effort switch on the models the router changes effort on most.
-  ...(['sonnet', 'opus'] as const).map(m =>
-    scheduled(`p1-effort-${m}`, `claude-${m}-5-5`, [
-      { turn: 1, effort: 'medium' },
-      { turn: 2, effort: 'low' },
-      { turn: 4, effort: 'medium' },
-    ]),
-  ),
-]
+const ARMS: Arm[] = [fixed('opus', 'claude-opus-5-5'), fixed('sonnet', 'claude-sonnet-5-5'), fixed('haiku', 'claude-haiku-5-5'), opusPlan]
 
 // Raised when a run says nothing about the arm; stops the eval.
 class Infra extends Error {}
@@ -316,7 +153,7 @@ const grade = async (
     return { pass: ok, detail: ok ? '' : `missing: ${task.grade.doc}` }
   }
   await mkdir(join(cwd, 'test-hidden'), { recursive: true })
-  await cp(here(`./${task.grade.dir ?? 'hidden'}/${task.grade.file}`), join(cwd, 'test-hidden', task.grade.file))
+  await cp(here(`./hidden/${task.grade.file}`), join(cwd, 'test-hidden', task.grade.file))
   const r = await runTests(cwd, 'node', ['--test'], 60_000)
   return { pass: r.count.ok, detail: r.failed.split('\n').slice(0, 5).join('\n') }
 }
@@ -378,7 +215,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
   const cwd = await mkdtemp(join(tmpdir(), `eval-${task.id.replace(/\//g, "_")}-${arm.name}-`))
   const home = await mkdtemp(join(tmpdir(), `eval-home-`))
   if (task.prepare) await task.prepare(cwd)
-  else await cp(here(`./${task.fixture ?? 'fixture'}`), cwd, { recursive: true })
+  else await cp(here('./fixture'), cwd, { recursive: true })
   await arm.setup?.(cwd)
   const prompts = typeof task.prompt === 'string' ? [task.prompt] : task.prompt
   // Kept documents and snapshots: <results>.artifacts/<task>/<arm>/<rep>/
@@ -389,7 +226,6 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
   let initId: string | undefined
   let rateLimit: SDKRateLimitInfo | undefined
   let settings: { language?: string; timeZone?: string } | undefined
-  const routerLog: string[] = []
   const steps: (ProbeStep & Record<string, unknown>)[] = []
   const splits = new Map<string, WriteSplit>()
   const turns: Record<string, unknown>[] = []
@@ -410,12 +246,11 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
         const split = splits.has(m.message.id) ? undefined : splitOf(m)
         if (split) splits.set(m.message.id, split)
       }
-      const line = routerLine(m)
+      const line = hookLine(m)
       if (line?.startsWith(PROBE_SETTINGS)) {
         settings = JSON.parse(line.slice(PROBE_SETTINGS.length))
         if (settings?.language !== LANGUAGE) throw new Infra(`${arm.name}: language is ${settings?.language}, expected ${LANGUAGE}`)
       } else if (line?.startsWith(PROBE_PREFIX)) steps.push(JSON.parse(line.slice(PROBE_PREFIX.length)))
-      else if (line) routerLog.push(line)
       if (m.type === 'result') {
         last = m
         turns.push({
@@ -435,7 +270,7 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
           snapshotTurns.push({ turn: turns.length, paths })
         }
         // After the last turn the input closes and the session ends by
-        // itself; lines logged after the result (the router's) still arrive.
+        // itself; lines logged after the result (the probe's) still arrive.
         convo?.turnEnded()
       }
     }
@@ -492,7 +327,6 @@ const runOne = async (task: Task, arm: Arm, rep: number) => {
     })),
     rateLimit: rateLimit ?? null,
     artifacts: task.grade.kind === 'scenario' || task.grade.kind === 'rubric' ? artifactsRel : null,
-    routerLog,
     reply: reply.slice(0, 2000),
   }
 }
@@ -525,19 +359,10 @@ const resumed = args.resume
   : undefined
 const armNames = args.arms?.split(',') ?? resumed?.arms
 const taskIds = args.tasks?.split(',') ?? resumed?.tasks
-const arms = armNames ? ARMS.filter(a => armNames.includes(a.name)) : ARMS.filter(a => !a.experiment)
-// --tasks takes ids, or a prefix ending in * (invoice/*). With no --tasks:
-// the small dev tasks (and the final ones too with --final). Naming a
-// final-split task needs --final.
+const arms = armNames ? ARMS.filter(a => armNames.includes(a.name)) : ARMS
+// --tasks takes ids, or a prefix ending in * (invoice/*). With no --tasks: the small tasks.
 const named = (id: string) => taskIds!.some(t => (t.endsWith('*') ? id.startsWith(t.slice(0, -1)) : id === t))
-const tasks = taskIds
-  ? TASKS.filter(t => named(t.id))
-  : TASKS.filter(t => !t.smoke && t.level !== 'scenario' && (args.final || t.split !== 'final'))
-const finals = tasks.filter(t => t.split === 'final')
-if (finals.length && !args.final) {
-  console.error(`final-split tasks need --final (they stay untouched while the router is tuned): ${finals.map(t => t.id).join(', ')}`)
-  process.exit(1)
-}
+const tasks = taskIds ? TASKS.filter(t => named(t.id)) : TASKS.filter(t => !t.smoke && t.level !== 'scenario')
 const reps = process.argv.includes('--reps') || !resumed ? Number(args.reps) : resumed.reps
 const concurrency = Number(args.concurrency)
 
@@ -599,7 +424,7 @@ const worker = async () => {
     const misordered = answered.filter(s => s.answered && s.answered !== s.model).length
     console.log(
       `[${done}] ${r.task} ${r.arm.padEnd(8)} ${r.pass ? 'PASS' : 'FAIL'} $${Number(r.costUsd ?? 0).toFixed(4)} ${r.durationMs}ms` +
-        `${r.denials.length ? ` denied=${r.denials.length}` : ''}${misordered ? ` probe-mismatch=${misordered}` : ''} ${r.routerLog.join(' | ')}`,
+        `${r.denials.length ? ` denied=${r.denials.length}` : ''}${misordered ? ` probe-mismatch=${misordered}` : ''}`,
     )
   }
 }

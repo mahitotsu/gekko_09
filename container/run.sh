@@ -24,7 +24,7 @@ root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 commit="$(git -C "$root" rev-parse HEAD)"
 dirty=0
 [[ -n "$(git -C "$root" status --porcelain)" ]] && dirty=1
-tag="gekko-eval:${commit:0:12}$( (( dirty )) && echo -dirty || true)"
+tag="opusplan-eval:${commit:0:12}$( (( dirty )) && echo -dirty || true)"
 
 "$engine" build --quiet -f "$root/container/Dockerfile" -t "$tag" "$root" >/dev/null
 image_id="$("$engine" image inspect --format '{{.Id}}' "$tag")"

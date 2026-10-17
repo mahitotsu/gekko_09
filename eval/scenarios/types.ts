@@ -1,4 +1,4 @@
-// A large scenario (P2): external materials in, a business app and its
+// A large scenario: external materials in, a business app and its
 // documents out, in five stages. Each scenario lives in eval/scenarios/<id>/:
 //   materials/  copied to docs/資料/ in the workspace (minutes, rules, spec, data)
 //   workspace/  the starting repository
@@ -20,8 +20,6 @@ export type Stage = {
 
 export type Scenario = {
   id: string
-  // dev: used while tuning the router. final: run only in the final eval (P6).
-  split: 'dev' | 'final'
   title: string
   stages: readonly Stage[]
   // The whole job in one request, for the single-turn autonomous run.

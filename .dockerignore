@@ -1,5 +1,4 @@
 .git
 node_modules
 eval/results
-bench-out
 .env

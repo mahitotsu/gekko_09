@@ -28,7 +28,6 @@ type Row = {
   steps?: Step[]
   denials?: { tool: string; input: string }[]
   concurrency?: number
-  routerLog: string[]
 }
 
 const dir = fileURLToPath(new URL('./results/', import.meta.url))
@@ -56,7 +55,6 @@ const median = (xs: number[]) => {
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0)
 const usd = (n: number) => (Number.isFinite(n) ? `$${n.toFixed(3)}` : '-')
 const sec = (ms: number) => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)}s` : '-')
-const pct = (n: number) => (Number.isFinite(n) ? `${Math.round(n * 100)}%` : '-')
 
 const table = (head: string[], body: (string | number)[][]) =>
   [`| ${head.join(' | ')} |`, `| ${head.map(() => '---').join(' | ')} |`, ...body.map(r => `| ${r.join(' | ')} |`)].join('\n')
@@ -144,44 +142,9 @@ if (withSteps.length) {
   if (misordered) console.log(`\n⚠ ${misordered} requests answered by a model other than the one the probe saw: the probe did not run last, or the API fell back.`)
 }
 
-// Haiku's share, by turns the router gave it and by tokens it processed.
-const withReqs = rows.filter(r => r.requests?.length)
-if (withReqs.length) {
-  console.log('\n## Haiku share (main-loop turns · all tokens)\n')
-  console.log(table(['arm', 'turns on Haiku', 'tokens on Haiku'], ARMS.map(a => {
-    const rs = withReqs.filter(r => r.arm === a)
-    const tierLines = rs.flatMap(r => r.routerLog.filter(l => l.startsWith('model-router: ')))
-    const haikuTurns = tierLines.filter(l => l.startsWith('model-router: haiku')).length
-    const tok = (x: RequestUsage) => x.in + x.cacheRead + x.cacheWrite5m + x.cacheWrite1h + x.out
-    const reqs = rs.flatMap(r => r.requests!)
-    return [
-      a,
-      tierLines.length ? `${haikuTurns}/${tierLines.length}` : '-',
-      pct(sum(reqs.filter(x => x.model.startsWith('claude-haiku')).map(tok)) / sum(reqs.map(tok))),
-    ]
-  })))
-}
-
 const denied = rows.filter(r => r.denials?.length)
 if (denied.length) {
   console.log('\n## Denied tool calls\n')
   console.log(table(['task', 'arm', 'rep', 'tool', 'input'], denied.flatMap(r =>
     r.denials!.map(d => [r.task, r.arm, r.rep, d.tool, '`' + d.input.replace(/\|/g, '\\|').replace(/`/g, "'") + '`']))))
-}
-
-const routed = rows.filter(r => r.arm === 'routed')
-if (routed.length) {
-  console.log('\n## Router decisions\n')
-  console.log(
-    table(
-      ['task', 'tier (why)', 'models billed'],
-      routed.map(r => [
-        r.task,
-        r.routerLog.map(l => l.replace(/^model-router: /, '').replace(/ · turn .*$/, '')).join('<br>'),
-        Object.entries(costs.get(r)!.byModel).length
-          ? Object.entries(costs.get(r)!.byModel).map(([m, u]) => `${m.replace('claude-', '')} ${usd(u)}`).join(', ')
-          : Object.entries(r.modelUsage ?? {}).map(([m, u]) => `${m.replace('claude-', '')} ${usd(u.costUSD)}`).join(', '),
-      ]),
-    ),
-  )
 }

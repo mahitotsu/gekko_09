@@ -27,7 +27,7 @@ test('a clean session passes', () => {
 test('catches what the eval did not load', () => {
   assert.match(contamination(init({ apiKeySource: 'ANTHROPIC_API_KEY' }), ['eval-probe'])!, /apiKeySource/)
   assert.match(contamination(init({ mcpServers: ['claude.ai Gmail:needs-auth'] }), ['eval-probe'])!, /MCP/)
-  assert.match(contamination(init(), ['model-router', 'eval-probe'])!, /expected eval-probe@inline, model-router@inline/)
+  assert.match(contamination(init(), ['other-plugin', 'eval-probe'])!, /expected eval-probe@inline, other-plugin@inline/)
   assert.match(contamination(init({ skills: ['anthropic-skills:pdf', 'debug'] }), ['eval-probe'])!, /anthropic-skills:pdf/)
   assert.match(contamination(init({ skills: ['debug', 'verify', 'extra'] }), ['eval-probe'], ['debug', 'verify'])!, /extra/)
 })
